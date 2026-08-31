@@ -3,15 +3,13 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal
 from enum import StrEnum
-from pathlib import Path
 from uuid import uuid4
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Integer, Numeric, String, Text, select, update
+from sqlalchemy import BigInteger, DateTime, Integer, Numeric, String, Text, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from app.config import get_settings
-from app.catalog import PRODUCT_SEEDS
 
 
 class Base(DeclarativeBase):
@@ -20,12 +18,10 @@ class Base(DeclarativeBase):
 
 class OrderStatus(StrEnum):
     CREATED = "created"
-    PROCESSING = "processing"
     PAID = "paid"
     CANCELED = "canceled"
     EXPIRED = "expired"
     REFUNDED = "refunded"
-    CHARGEBACK = "chargeback"
 
 
 class User(Base):
@@ -36,22 +32,6 @@ class User(Base):
     full_name: Mapped[str] = mapped_column(String(255), default="")
     balance_rub: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0.00"))
     purchases_count: Mapped[int] = mapped_column(Integer, default=0)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-
-
-class Product(Base):
-    __tablename__ = "products"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    key: Mapped[str] = mapped_column(String(64), unique=True, index=True)
-    title: Mapped[str] = mapped_column(String(255))
-    description: Mapped[str] = mapped_column(Text, default="")
-    price_rub: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    price_stars: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    emoji: Mapped[str] = mapped_column(String(16), default="🛍")
-    kind: Mapped[str] = mapped_column(String(32), default="physical")
-    requires_brief: Mapped[bool] = mapped_column(Boolean, default=False)
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
@@ -79,29 +59,8 @@ SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
 
 async def init_db() -> None:
-    if settings.database_url.startswith("sqlite"):
-        database_path = settings.database_url.removeprefix("sqlite+aiosqlite:///")
-        if database_path and database_path != ":memory:":
-            Path(database_path).parent.mkdir(parents=True, exist_ok=True)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    async with SessionLocal() as session:
-        for seed in PRODUCT_SEEDS:
-            existing = await session.scalar(select(Product).where(Product.key == seed.key))
-            if existing is None:
-                session.add(
-                    Product(
-                        key=seed.key,
-                        title=seed.title,
-                        description=seed.description,
-                        price_rub=seed.price_rub,
-                        price_stars=seed.price_stars,
-                        emoji=seed.emoji,
-                        kind=seed.kind,
-                        requires_brief=seed.requires_brief,
-                    )
-                )
-        await session.commit()
 
 
 async def get_or_create_user(session: AsyncSession, telegram_id: int, username: str | None, full_name: str) -> User:
@@ -168,10 +127,7 @@ async def mark_order_paid(
 
     result = await session.execute(
         update(Order)
-        .where(
-            Order.id == order_id,
-            Order.status.in_([OrderStatus.CREATED.value, OrderStatus.PROCESSING.value]),
-        )
+        .where(Order.id == order_id, Order.status != OrderStatus.PAID.value)
         .values(**values)
     )
     changed = result.rowcount == 1
@@ -190,17 +146,7 @@ async def update_order_status(session: AsyncSession, order_id: str, status: str)
     order = await session.get(Order, order_id)
     if order is None:
         return None
-    allowed = {
-        OrderStatus.PROCESSING.value,
-        OrderStatus.CANCELED.value,
-        OrderStatus.EXPIRED.value,
-        OrderStatus.REFUNDED.value,
-        OrderStatus.CHARGEBACK.value,
-    }
-    if status in allowed and not (
-        order.status == OrderStatus.PAID.value
-        and status not in {OrderStatus.REFUNDED.value, OrderStatus.CHARGEBACK.value}
-    ):
+    if order.status != OrderStatus.PAID.value:
         order.status = status
         await session.commit()
     return order
@@ -211,23 +157,3 @@ async def recent_orders(session: AsyncSession, user_id: int, limit: int = 10) ->
         select(Order).where(Order.user_id == user_id).order_by(Order.created_at.desc()).limit(limit)
     )
     return list(result.scalars())
-
-
-async def active_products(session: AsyncSession) -> list[Product]:
-    result = await session.execute(
-        select(Product).where(Product.is_active.is_(True)).order_by(Product.id)
-    )
-    return list(result.scalars())
-
-
-async def all_products(session: AsyncSession) -> list[Product]:
-    result = await session.execute(select(Product).order_by(Product.id))
-    return list(result.scalars())
-
-
-async def get_product(session: AsyncSession, product_id: int) -> Product | None:
-    return await session.get(Product, product_id)
-
-
-async def get_product_by_key(session: AsyncSession, key: str) -> Product | None:
-    return await session.scalar(select(Product).where(Product.key == key))

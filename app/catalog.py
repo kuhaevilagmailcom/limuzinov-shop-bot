@@ -2,50 +2,38 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
-class SeedProduct:
+class Product:
     key: str
     title: str
     description: str
-    price_rub: int | None
-    price_stars: int | None
+    price_rub: int
     emoji: str
-    kind: str = "physical"
-    requires_brief: bool = False
 
 
-PRODUCT_SEEDS: tuple[SeedProduct, ...] = (
-    SeedProduct(
-        key="song",
-        title="Создать песню",
-        description="Персональная песня по вашему сюжету, настроению и пожеланиям.",
-        price_rub=None,
-        price_stars=350,
-        emoji="🎵",
-        kind="digital",
-        requires_brief=True,
-    ),
-    SeedProduct(
+# Безопасный пример каталога физических товаров.
+# Никотиновая/вейп-продукция намеренно не включена.
+PRODUCTS: dict[str, Product] = {
+    "stickers": Product(
         key="stickers",
         title="Набор стикеров",
         description="Фирменный набор виниловых стикеров.",
         price_rub=390,
-        price_stars=None,
         emoji="✨",
     ),
-    SeedProduct(
+    "case": Product(
         key="case",
         title="Чехол",
         description="Фирменный защитный чехол.",
         price_rub=1290,
-        price_stars=None,
         emoji="📱",
     ),
-    SeedProduct(
+    "merch": Product(
         key="merch",
         title="Футболка",
         description="Фирменная футболка Limuzinov Shop.",
         price_rub=2490,
-        price_stars=None,
         emoji="👕",
     ),
-)
+}
+
+SONG_ORDER_STARS = 350
