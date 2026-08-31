@@ -371,8 +371,7 @@ async def show_id(message: Message) -> None:
 async def admin_panel(message: Message, state: FSMContext) -> None:
     await state.clear()
     if not is_admin(message.from_user.id):
-        if not settings.admins:
-            await message.answer("Администратор ещё не указан. Добавьте в <code>.env</code> строку:\n<code>ADMIN_IDS=" f"{message.from_user.id}</code>\nи перезапустите бота.")
+        await message.answer("⛔ У вас нет доступа к админ-панели.")
         return
     await admin_home(message)
 

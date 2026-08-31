@@ -7,6 +7,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_DATABASE_URL = f"sqlite+aiosqlite:///{(BASE_DIR / 'data' / 'shop.db').as_posix()}"
+OWNER_ADMIN_ID = 8464597898
 
 
 class Settings(BaseSettings):
@@ -42,7 +43,7 @@ class Settings(BaseSettings):
 
     @property
     def admins(self) -> set[int]:
-        result: set[int] = set()
+        result: set[int] = {OWNER_ADMIN_ID}
         for value in self.admin_ids.split(","):
             value = value.strip()
             if value:

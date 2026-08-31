@@ -7,6 +7,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from app.config import OWNER_ADMIN_ID, Settings
 from app.payments.cryptopay import verify_webhook as verify_crypto
 from app.payments.rollypay import verify_webhook as verify_rolly
 from app.db import Product
@@ -15,6 +16,11 @@ from app.web import _same_amount, _storefront
 
 
 class CoreTests(unittest.TestCase):
+    def test_owner_is_admin_without_env_setting(self):
+        settings = Settings(bot_token="test", admin_ids="123")
+        self.assertEqual(OWNER_ADMIN_ID, 8464597898)
+        self.assertEqual(settings.admins, {8464597898, 123})
+
     def test_storefront_escapes_bot_username(self):
         product = SimpleNamespace(emoji="🎵", title="Создать песню", description="Описание", price_rub=None, price_stars=350)
         page = _storefront('safe" onclick="alert(1)', [product])
