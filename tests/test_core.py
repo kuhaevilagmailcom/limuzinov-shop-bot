@@ -22,7 +22,14 @@ from app.db import (
     support_ticket_messages,
     support_rate_limited,
 )
-from app.keyboards import admin_product_keyboard, main_keyboard, product_keyboard, support_ticket_keyboard
+from app.keyboards import (
+    admin_product_keyboard,
+    main_keyboard,
+    product_keyboard,
+    product_kind_keyboard,
+    support_ticket_keyboard,
+)
+from app.ui import DIVIDER, screen
 from app.web import _same_amount, create_web_app
 
 
@@ -54,12 +61,21 @@ class CoreTests(unittest.TestCase):
         self.assertNotIn("buy:crypto:7", buy_data)
         self.assertIn("admin:edit:rub:7", admin_data)
         self.assertIn("admin:edit:stars:7", admin_data)
+        buy_labels = [button.text for row in product_keyboard(product).inline_keyboard for button in row]
+        self.assertTrue(any("Оплатить по СБП" in label for label in buy_labels))
+        self.assertTrue(any("Оплатить Stars" in label for label in buy_labels))
 
     def test_admin_main_menu_and_support_controls(self):
         regular_buttons = [button.text for row in main_keyboard(False).keyboard for button in row]
         admin_buttons = [button.text for row in main_keyboard(True).keyboard for button in row]
         self.assertNotIn("⚙️ Админ-панель", regular_buttons)
         self.assertIn("⚙️ Админ-панель", admin_buttons)
+        self.assertIn("📦 Заказы", regular_buttons)
+        self.assertIn("💬 Поддержка", regular_buttons)
+        kind_actions = [button.callback_data for row in product_kind_keyboard().inline_keyboard for button in row]
+        self.assertIn("admin:kind:physical", kind_actions)
+        self.assertIn("admin:kind:digital", kind_actions)
+        self.assertIn(DIVIDER, screen("✨", "Заголовок", "Текст"))
 
     @patch("app.payments.rollypay.get_settings")
     def test_rollypay_signature(self, mocked_settings):

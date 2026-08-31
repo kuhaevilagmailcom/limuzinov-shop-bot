@@ -26,10 +26,10 @@ async def main() -> None:
     await init_db()
     await bot.set_my_commands(
         [
-            BotCommand(command="start", description="Открыть магазин"),
-            BotCommand(command="paysupport", description="Помощь с оплатой"),
-            BotCommand(command="id", description="Узнать свой Telegram ID"),
-            BotCommand(command="admin", description="Админ-панель"),
+            BotCommand(command="start", description="✨ Главное меню"),
+            BotCommand(command="paysupport", description="💬 Написать в поддержку"),
+            BotCommand(command="id", description="🪪 Показать Telegram ID"),
+            BotCommand(command="admin", description="⚙️ Управление магазином"),
         ]
     )
 

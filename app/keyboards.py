@@ -6,15 +6,15 @@ from app.db import Product, SupportStatus, SupportTicket
 
 def main_keyboard(admin: bool = False) -> ReplyKeyboardMarkup:
     rows = [
-        [KeyboardButton(text="🛍 Каталог"), KeyboardButton(text="📦 Мои покупки")],
-        [KeyboardButton(text="👤 Профиль"), KeyboardButton(text="🆘 Поддержка")],
+        [KeyboardButton(text="🛍 Каталог"), KeyboardButton(text="📦 Заказы")],
+        [KeyboardButton(text="👤 Профиль"), KeyboardButton(text="💬 Поддержка")],
     ]
     if admin:
         rows.append([KeyboardButton(text="⚙️ Админ-панель")])
     return ReplyKeyboardMarkup(
         keyboard=rows,
         resize_keyboard=True,
-        input_field_placeholder="Выберите действие…",
+        input_field_placeholder="Что хотите открыть?",
     )
 
 
@@ -44,19 +44,19 @@ def catalog_keyboard(products: list[Product]) -> InlineKeyboardMarkup:
 def product_keyboard(product: Product) -> InlineKeyboardMarkup:
     settings = get_settings()
     rows: list[list[InlineKeyboardButton]] = []
-    if product.price_stars:
-        rows.append([InlineKeyboardButton(text=f"⭐ Telegram Stars · {product.price_stars}", callback_data=f"buy:stars:{product.id}")])
     if product.price_rub and settings.rollypay_enabled:
-        rows.append([InlineKeyboardButton(text=f"⚡ СБП · {product.price_rub} ₽", callback_data=f"buy:rolly:{product.id}")])
-    rows.append([InlineKeyboardButton(text="← Вернуться в каталог", callback_data="catalog")])
+        rows.append([InlineKeyboardButton(text=f"⚡ Оплатить по СБП · {product.price_rub} ₽", callback_data=f"buy:rolly:{product.id}")])
+    if product.price_stars:
+        rows.append([InlineKeyboardButton(text=f"⭐ Оплатить Stars · {product.price_stars}", callback_data=f"buy:stars:{product.id}")])
+    rows.append([InlineKeyboardButton(text="‹ Назад в каталог", callback_data="catalog")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def payment_url_keyboard(url: str, order_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="💸 Перейти к оплате", url=url)],
-            [InlineKeyboardButton(text="🔄 Проверить статус", callback_data=f"status:{order_id}")],
+            [InlineKeyboardButton(text="💳 Открыть страницу оплаты", url=url)],
+            [InlineKeyboardButton(text="🔄 Проверить платёж", callback_data=f"status:{order_id}")],
         ]
     )
 
@@ -64,11 +64,11 @@ def payment_url_keyboard(url: str, order_id: str) -> InlineKeyboardMarkup:
 def admin_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="📦 Управление товарами", callback_data="admin:products")],
-            [InlineKeyboardButton(text="➕ Создать товар", callback_data="admin:add")],
-            [InlineKeyboardButton(text="🆘 Новые обращения", callback_data="admin:support:new")],
+            [InlineKeyboardButton(text="📦 Товары", callback_data="admin:products")],
+            [InlineKeyboardButton(text="✨ Создать товар", callback_data="admin:add")],
+            [InlineKeyboardButton(text="💬 Новые обращения", callback_data="admin:support:new")],
             [
-                InlineKeyboardButton(text="📂 Все обращения", callback_data="admin:support:all"),
+                InlineKeyboardButton(text="🗂 Все", callback_data="admin:support:all"),
                 InlineKeyboardButton(text="✅ Закрытые", callback_data="admin:support:closed"),
             ],
         ]
@@ -80,8 +80,8 @@ def admin_products_keyboard(products: list[Product]) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=f"{p.emoji} {p.title} · {product_price(p)}", callback_data=f"admin:product:{p.id}")]
         for p in products
     ]
-    rows.append([InlineKeyboardButton(text="➕ Создать товар", callback_data="admin:add")])
-    rows.append([InlineKeyboardButton(text="← Админ-панель", callback_data="admin:home")])
+    rows.append([InlineKeyboardButton(text="✨ Создать товар", callback_data="admin:add")])
+    rows.append([InlineKeyboardButton(text="‹ Админ-панель", callback_data="admin:home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -89,19 +89,19 @@ def admin_product_keyboard(product: Product) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="💵 Цена ₽", callback_data=f"admin:edit:rub:{product.id}"),
+                InlineKeyboardButton(text="⚡ Цена СБП", callback_data=f"admin:edit:rub:{product.id}"),
                 InlineKeyboardButton(text="⭐ Цена Stars", callback_data=f"admin:edit:stars:{product.id}"),
             ],
-            [InlineKeyboardButton(text="📝 Название и описание", callback_data=f"admin:edit:text:{product.id}")],
+            [InlineKeyboardButton(text="✏️ Название и описание", callback_data=f"admin:edit:text:{product.id}")],
             [InlineKeyboardButton(text="🙈 Скрыть" if product.is_active else "👁 Показать", callback_data=f"admin:toggle:{product.id}")],
-            [InlineKeyboardButton(text="← К товарам", callback_data="admin:products")],
+            [InlineKeyboardButton(text="‹ К товарам", callback_data="admin:products")],
         ]
     )
 
 
 def support_cancel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="✖️ Отменить обращение", callback_data="support:cancel")]]
+        inline_keyboard=[[InlineKeyboardButton(text="✖️ Отменить", callback_data="support:cancel")]]
     )
 
 
@@ -113,6 +113,22 @@ def support_ticket_keyboard(ticket: SupportTicket) -> InlineKeyboardMarkup:
     else:
         rows.append([InlineKeyboardButton(text="↩️ Открыть снова", callback_data=f"support:reopen:{ticket.id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def admin_cancel_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="✖️ Отменить", callback_data="admin:cancel")]]
+    )
+
+
+def product_kind_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📦 Физический товар", callback_data="admin:kind:physical")],
+            [InlineKeyboardButton(text="💾 Цифровой товар", callback_data="admin:kind:digital")],
+            [InlineKeyboardButton(text="✖️ Отменить", callback_data="admin:cancel")],
+        ]
+    )
 
 
 def support_tickets_keyboard(tickets: list[SupportTicket], scope: str) -> InlineKeyboardMarkup:
@@ -130,5 +146,5 @@ def support_tickets_keyboard(tickets: list[SupportTicket], scope: str) -> Inline
         ]
         for ticket in tickets
     ]
-    rows.append([InlineKeyboardButton(text="← Админ-панель", callback_data="admin:home")])
+    rows.append([InlineKeyboardButton(text="‹ Админ-панель", callback_data="admin:home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)

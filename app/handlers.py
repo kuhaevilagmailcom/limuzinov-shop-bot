@@ -41,6 +41,7 @@ from app.db import (
     support_rate_limited,
 )
 from app.keyboards import (
+    admin_cancel_keyboard,
     admin_keyboard,
     admin_product_keyboard,
     admin_products_keyboard,
@@ -48,6 +49,7 @@ from app.keyboards import (
     main_keyboard,
     payment_url_keyboard,
     product_keyboard,
+    product_kind_keyboard,
     product_price,
     support_cancel_keyboard,
     support_ticket_keyboard,
@@ -55,6 +57,7 @@ from app.keyboards import (
 )
 from app.notifications import notify_order_paid
 from app.payments.rollypay import RollyPayError, create_payment, get_payment
+from app.ui import ORDER_STATUS_LABELS, screen, success, warning
 
 router = Router()
 settings = get_settings()
@@ -121,13 +124,14 @@ def support_ticket_text(ticket: SupportTicket) -> str:
         SupportStatus.ANSWERED.value: "💬 дан ответ",
         SupportStatus.CLOSED.value: "✅ закрыто",
     }
-    return (
-        f"🆘 <b>Обращение #{ticket.id}</b>\n\n"
-        f"Статус: <b>{labels.get(ticket.status, ticket.status)}</b>\n"
-        f"Пользователь: <b>{html.escape(ticket.full_name)}</b>\n"
-        f"Username: {username}\n"
-        f"Telegram ID: <code>{ticket.user_id}</code>\n"
-        f"Создано: <code>{ticket.created_at:%d.%m.%Y %H:%M}</code>"
+    return screen(
+        "💬",
+        f"Обращение #{ticket.id}",
+        f"{labels.get(ticket.status, ticket.status)}\n\n"
+        f"👤 <b>{html.escape(ticket.full_name)}</b>\n"
+        f"🔗 {username}\n"
+        f"🆔 <code>{ticket.user_id}</code>\n"
+        f"🕒 <code>{ticket.created_at:%d.%m.%Y %H:%M}</code>",
     )
 
 
@@ -162,12 +166,14 @@ async def ensure_user(message: Message) -> User:
 
 
 def menu_text(user: User) -> str:
-    return (
-        "✨ <b>LIMYZINOV SHOP</b>\n"
-        "<i>Удобные покупки прямо в Telegram</i>\n\n"
-        f"Рады видеть, <b>{html.escape(user.full_name)}</b>.\n"
-        f"У вас покупок: <b>{user.purchases_count}</b>\n\n"
-        "Откройте каталог и выберите свой вайб ↓"
+    return screen(
+        "✨",
+        "LIMYZINOV SHOP",
+        f"Привет, <b>{html.escape(user.full_name)}</b>!\n\n"
+        "🛍 Выбирайте товары\n"
+        "⚡ Оплачивайте по СБП\n"
+        "⭐ Или используйте Telegram Stars",
+        "Всё просто — нужный раздел уже в меню",
     )
 
 
@@ -185,9 +191,19 @@ async def start(message: Message, state: FSMContext) -> None:
 async def send_catalog(message: Message, *, edit: bool = False) -> None:
     async with SessionLocal() as session:
         products = await active_products(session)
-    text = "🛍 <b>Витрина LIMYZINOV</b>\n\nВыберите товар:"
+    text = screen(
+        "🛍",
+        "Каталог",
+        "Выберите товар — покажем описание и способы оплаты.",
+        "Оплата: СБП • Telegram Stars",
+    )
     if not products:
-        text = "🛍 Каталог пока пуст. Скоро здесь появятся товары."
+        text = screen(
+            "🛍",
+            "Каталог пока пуст",
+            "Новые товары уже готовятся к появлению.",
+            "Загляните немного позже",
+        )
     if edit:
         await message.edit_text(text, reply_markup=catalog_keyboard(products))
     else:
@@ -214,10 +230,13 @@ async def product_card(callback: CallbackQuery) -> None:
             await callback.answer("Товар не найден", show_alert=True)
             return
         await callback.message.edit_text(
-            f"{product.emoji} <b>{html.escape(product.title)}</b>\n\n"
-            f"{html.escape(product.description)}\n\n"
-            f"Цена: <b>{product_price(product)}</b>\n\n"
-            "Выберите удобный способ оплаты:",
+            screen(
+                product.emoji,
+                html.escape(product.title),
+                f"{html.escape(product.description)}\n\n"
+                f"💳 Стоимость: <b>{product_price(product)}</b>",
+                "Выберите удобный способ оплаты",
+            ),
             reply_markup=product_keyboard(product),
         )
     await callback.answer()
@@ -234,12 +253,12 @@ async def send_payment(
     brief: str = "",
 ) -> None:
     if provider not in {"rolly", "stars"}:
-        await message.answer("Этот способ оплаты недоступен.")
+        await message.answer(warning("Оплата недоступна", "Выберите СБП или Telegram Stars."))
         return
     async with SessionLocal() as session:
         product = await get_product(session, product_id)
         if not product or not product.is_active:
-            await message.answer("Товар больше недоступен.")
+            await message.answer(warning("Товар недоступен", "Вернитесь в каталог и выберите другую позицию."))
             return
         await get_or_create_user(session, user_id, username, full_name)
         description = brief.strip() if brief else product.description
@@ -256,7 +275,7 @@ async def send_payment(
 
         if provider == "stars":
             if not product.price_stars:
-                await message.answer("Оплата Stars для этого товара не настроена.")
+                await message.answer(warning("Stars недоступны", "Для этого товара цена в Stars ещё не настроена."))
                 return
             order.payment_method = "telegram_stars"
             await session.commit()
@@ -272,7 +291,7 @@ async def send_payment(
             return
 
         if not product.price_rub:
-            await message.answer("Рублёвая цена для этого товара не настроена.")
+            await message.answer(warning("СБП недоступна", "Для этого товара цена в рублях ещё не настроена."))
             return
         try:
             payment = await create_payment(order.id, Decimal(product.price_rub), f"{product.title} / заказ {order.id[:8]}", user_id)
@@ -282,15 +301,18 @@ async def send_payment(
             await session.commit()
         except (RollyPayError, KeyError) as exc:
             logger.exception("Payment creation failed for order %s: %s", order.id, exc)
-            await message.answer("⚠️ Платёжная страница сейчас не ответила. Попробуйте ещё раз через минуту.")
+            await message.answer(warning("Не удалось создать платёж", "Попробуйте ещё раз через минуту."))
             return
 
     await message.answer(
-        "🧾 <b>Заказ создан</b>\n\n"
-        f"Товар: {html.escape(product.title)}\n"
-        f"Сумма: <b>{product.price_rub} ₽</b>\n"
-        f"Заказ: <code>{order.id}</code>\n\n"
-        "После оплаты статус обновится автоматически.",
+        screen(
+            "🧾",
+            "Заказ создан",
+            f"🛍 {html.escape(product.title)}\n"
+            f"💳 К оплате: <b>{product.price_rub} ₽</b>\n"
+            f"🔖 Номер: <code>{order.id[:8]}</code>",
+            "После оплаты нажмите «Проверить платёж»",
+        ),
         reply_markup=payment_url_keyboard(pay_url, order.id),
     )
 
@@ -326,7 +348,7 @@ async def buy_product(callback: CallbackQuery, state: FSMContext, bot: Bot) -> N
 @router.message(ProductOrderForm.brief)
 async def product_brief(message: Message, state: FSMContext, bot: Bot) -> None:
     if not message.text or len(message.text.strip()) < 5:
-        await message.answer("Напишите чуть подробнее — хотя бы 5 символов.")
+        await message.answer(warning("Нужно больше деталей", "Напишите хотя бы 5 символов."))
         return
     data = await state.get_data()
     await state.clear()
@@ -355,7 +377,7 @@ async def check_status(callback: CallbackQuery) -> None:
             else:
                 changed = False
             if changed:
-                await callback.message.answer("✅ Платёж подтверждён. Заказ оплачен!")
+                await callback.message.answer(success("Платёж подтверждён", "Заказ оплачен и принят в работу."))
                 await notify_order_paid(callback.bot, order, notify_customer=False)
                 await callback.answer("Оплачено", show_alert=True)
                 return
@@ -389,7 +411,12 @@ async def stars_success(message: Message, bot: Bot) -> None:
             return
         order, changed = await mark_order_paid(session, order_id, payment_method="telegram_stars", provider_payment_id=payment.telegram_payment_charge_id)
     if order:
-        await message.answer("✅ <b>Оплата получена!</b>\n\n" f"Заказ: <code>{order.id}</code>\n" "Мы получили заказ и скоро свяжемся с вами.")
+        await message.answer(
+            success(
+                "Оплата получена",
+                f"Заказ: <code>{order.id[:8]}</code>\n\nМы уже начали обработку покупки.",
+            )
+        )
         if changed:
             await notify_order_paid(bot, order, notify_customer=False)
 
@@ -397,34 +424,56 @@ async def stars_success(message: Message, bot: Bot) -> None:
 @router.message(F.text.in_({"👤 Профиль", "💰 Баланс"}))
 async def profile(message: Message) -> None:
     user = await ensure_user(message)
-    await message.answer("👤 <b>Ваш профиль</b>\n\n" f"Имя: <b>{html.escape(user.full_name)}</b>\n" f"Всего покупок: <b>{user.purchases_count}</b>")
+    username = f"@{html.escape(user.username)}" if user.username else "не указан"
+    await message.answer(
+        screen(
+            "👤",
+            "Профиль LIMYZINOV",
+            f"💎 <b>{html.escape(user.full_name)}</b>\n"
+            f"🔗 {username}\n"
+            f"🆔 <code>{user.telegram_id}</code>\n\n"
+            f"🛍 Покупок: <b>{user.purchases_count}</b>\n"
+            f"📅 С нами с: <b>{user.created_at:%d.%m.%Y}</b>",
+            "История покупок доступна в разделе «Заказы»",
+        )
+    )
 
 
-@router.message(F.text == "📦 Мои покупки")
+@router.message(F.text.in_({"📦 Заказы", "📦 Мои покупки"}))
 async def my_orders(message: Message) -> None:
     await ensure_user(message)
     async with SessionLocal() as session:
         orders = await recent_orders(session, message.from_user.id, 10)
     if not orders:
-        await message.answer("📦 У вас пока нет заказов.")
+        await message.answer(
+            screen("📦", "Заказов пока нет", "Выберите первый товар в каталоге.", "Ваши покупки появятся здесь")
+        )
         return
-    labels = {"created": "🕓 ожидает оплаты", "processing": "⚡ обрабатывается", "paid": "✅ оплачен", "canceled": "❌ отменён", "expired": "⌛ истёк", "refunded": "↩️ возврат", "chargeback": "↩️ отмена платежа"}
-    rows = ["📦 <b>Последние заказы</b>\n"]
-    for order in orders:
+    rows = []
+    for index, order in enumerate(orders, 1):
         amount = f"{order.amount_stars} ⭐" if order.amount_stars else f"{money(order.amount_rub or Decimal(0))} ₽"
-        rows.append(f"• {html.escape(order.title)} — {amount}\n  {labels.get(order.status, order.status)} · <code>{order.id[:8]}</code>")
-    await message.answer("\n".join(rows))
+        rows.append(
+            f"<b>{index}. {html.escape(order.title)}</b>\n"
+            f"{ORDER_STATUS_LABELS.get(order.status, order.status)} · {amount}\n"
+            f"🔖 <code>{order.id[:8]}</code>"
+        )
+    await message.answer(screen("📦", "Ваши заказы", "\n\n".join(rows), "Показываем последние 10 заказов"))
 
 
-@router.message(F.text == "🆘 Поддержка")
+@router.message(F.text.in_({"💬 Поддержка", "🆘 Поддержка"}))
 @router.message(Command("paysupport"))
 async def support(message: Message, state: FSMContext) -> None:
     await ensure_user(message)
     await state.set_state(SupportUserForm.content)
     await message.answer(
-        "🆘 <b>Поддержка LIMYZINOV SHOP</b>\n\n"
-        "Отправьте одним сообщением текст, фотографию, видео, документ или голосовое сообщение. "
-        "Оно сразу придёт администратору.",
+        screen(
+            "💬",
+            "Поддержка",
+            "Опишите вопрос одним сообщением. Можно прикрепить:\n\n"
+            "📝 текст   🖼 фото   🎬 видео\n"
+            "📎 документ   🎙 голосовое",
+            "Сообщение сразу получит владелец магазина",
+        ),
         reply_markup=support_cancel_keyboard(),
     )
 
@@ -433,7 +482,7 @@ async def support(message: Message, state: FSMContext) -> None:
 async def support_cancel(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await callback.message.answer(
-        "Обращение отменено.",
+        success("Готово", "Обращение отменено."),
         reply_markup=main_keyboard(is_admin(callback.from_user.id)),
     )
     await callback.answer()
@@ -443,12 +492,12 @@ async def support_cancel(callback: CallbackQuery, state: FSMContext) -> None:
 async def support_receive(message: Message, state: FSMContext) -> None:
     if message.content_type not in SUPPORT_CONTENT_TYPES:
         await message.answer(
-            "Можно отправить текст, фотографию, видео, документ или голосовое сообщение.",
+            warning("Формат не поддерживается", "Отправьте текст, фото, видео, документ или голосовое."),
             reply_markup=support_cancel_keyboard(),
         )
         return
     if message.content_type == ContentType.TEXT and not support_message_body(message):
-        await message.answer("Сообщение не должно быть пустым.", reply_markup=support_cancel_keyboard())
+        await message.answer(warning("Пустое сообщение", "Напишите вопрос или прикрепите файл."), reply_markup=support_cancel_keyboard())
         return
 
     async with SessionLocal() as session:
@@ -459,7 +508,7 @@ async def support_receive(message: Message, state: FSMContext) -> None:
             full_name=message.from_user.full_name,
         )
         if await support_rate_limited(session, user.telegram_id):
-            await message.answer("Слишком часто. Подождите 10 секунд и отправьте сообщение ещё раз.")
+            await message.answer(warning("Слишком быстро", "Подождите 10 секунд и повторите отправку."))
             return
         ticket = await get_active_support_ticket(session, user.telegram_id)
         if ticket is None:
@@ -494,9 +543,10 @@ async def support_receive(message: Message, state: FSMContext) -> None:
 
     await state.clear()
     await message.answer(
-        f"✅ <b>Сообщение отправлено</b>\n\n"
-        f"Номер обращения: <code>#{ticket.id}</code>\n"
-        "Поддержка скоро ответит.",
+        success(
+            "Сообщение отправлено",
+            f"Номер обращения: <code>#{ticket.id}</code>\n\nПоддержка скоро ответит прямо в этом чате.",
+        ),
         reply_markup=main_keyboard(is_admin(message.from_user.id)),
     )
 
@@ -512,20 +562,22 @@ async def admin_home(target: Message) -> None:
                 select(func.count()).select_from(SupportTicket).where(SupportTicket.status == SupportStatus.NEW.value)
             )
         ).scalar_one()
-    text = (
-        "🛠 <b>Админ-панель</b>\n\n"
-        f"Товаров: <b>{products_count}</b>\n"
-        f"Пользователей: <b>{users_count}</b>\n"
-        f"Заказов: <b>{orders_count}</b>\n"
-        f"Оплачено: <b>{paid_count}</b>\n"
-        f"Новых обращений: <b>{support_count}</b>"
+    text = screen(
+        "⚙️",
+        "Панель управления",
+        f"📦 Товаров: <b>{products_count}</b>\n"
+        f"👥 Клиентов: <b>{users_count}</b>\n"
+        f"🧾 Заказов: <b>{orders_count}</b>\n"
+        f"💳 Оплачено: <b>{paid_count}</b>\n"
+        f"💬 Новых обращений: <b>{support_count}</b>",
+        "Выберите раздел",
     )
     await target.answer(text, reply_markup=admin_keyboard())
 
 
 @router.message(Command("id"))
 async def show_id(message: Message) -> None:
-    await message.answer(f"Ваш Telegram ID: <code>{message.from_user.id}</code>")
+    await message.answer(screen("🪪", "Ваш Telegram ID", f"<code>{message.from_user.id}</code>"))
 
 
 @router.message(Command("admin"))
@@ -533,9 +585,42 @@ async def show_id(message: Message) -> None:
 async def admin_panel(message: Message, state: FSMContext) -> None:
     await state.clear()
     if not is_admin(message.from_user.id):
-        await message.answer("⛔ У вас нет доступа к админ-панели.")
+        await message.answer(warning("Доступ закрыт", "Админ-панель доступна только владельцу магазина."))
         return
     await admin_home(message)
+
+
+async def finish_admin_product(target: Message, state: FSMContext, kind: str) -> Product | None:
+    data = await state.get_data()
+    required = {"title", "description", "price_rub", "price_stars"}
+    if kind not in {"physical", "digital"} or not required.issubset(data):
+        await state.clear()
+        await target.answer(warning("Создание прервано", "Данные устарели. Начните создание товара заново."))
+        return None
+    async with SessionLocal() as session:
+        product = Product(
+            key=f"item-{uuid4().hex[:10]}",
+            title=data["title"][:255],
+            description=data["description"],
+            price_rub=data["price_rub"],
+            price_stars=data["price_stars"],
+            emoji="📦" if kind == "physical" else "💾",
+            kind=kind,
+            requires_brief=False,
+        )
+        session.add(product)
+        await session.commit()
+        await session.refresh(product)
+    await state.clear()
+    await target.answer(
+        success(
+            "Товар создан",
+            f"{product.emoji} <b>{html.escape(product.title)}</b>\n"
+            f"💳 {product_price(product)}",
+        ),
+        reply_markup=admin_product_keyboard(product),
+    )
+    return product
 
 
 @router.callback_query(F.data.startswith("admin:"))
@@ -546,10 +631,19 @@ async def admin_callbacks(callback: CallbackQuery, state: FSMContext) -> None:
     action = callback.data.split(":")
     if action[1] == "home":
         await admin_home(callback.message)
+    elif action[1] == "cancel":
+        await state.clear()
+        await admin_home(callback.message)
+        await callback.answer("Действие отменено")
+        return
     elif action[1] == "products":
         async with SessionLocal() as session:
             products = await all_products(session)
-        await callback.message.answer("📦 <b>Товары</b>\n\nВыберите позицию:", reply_markup=admin_products_keyboard(products))
+        body = "Выберите товар для редактирования." if products else "Товаров пока нет — создайте первый."
+        await callback.message.answer(
+            screen("📦", "Управление товарами", body),
+            reply_markup=admin_products_keyboard(products),
+        )
     elif action[1] == "support":
         if not is_support_admin(callback.from_user.id):
             await callback.answer("Доступ только владельцу", show_alert=True)
@@ -562,13 +656,12 @@ async def admin_callbacks(callback: CallbackQuery, state: FSMContext) -> None:
         async with SessionLocal() as session:
             tickets = await list_support_tickets(session, status=status)
         titles = {
-            "new": "🆘 <b>Новые обращения</b>",
-            "all": "📂 <b>Все обращения</b>",
-            "closed": "✅ <b>Закрытые обращения</b>",
+            "new": ("💬", "Новые обращения"),
+            "all": ("🗂", "Все обращения"),
+            "closed": ("✅", "Закрытые обращения"),
         }
-        text = titles.get(scope, titles["all"])
-        if not tickets:
-            text += "\n\nЗдесь пока пусто."
+        icon, title = titles.get(scope, titles["all"])
+        text = screen(icon, title, f"Найдено: <b>{len(tickets)}</b>" if tickets else "Здесь пока пусто.")
         await callback.message.answer(text, reply_markup=support_tickets_keyboard(tickets, scope))
     elif action[1] == "product":
         async with SessionLocal() as session:
@@ -577,7 +670,13 @@ async def admin_callbacks(callback: CallbackQuery, state: FSMContext) -> None:
                 await callback.answer("Товар не найден", show_alert=True)
                 return
             await callback.message.answer(
-                f"{product.emoji} <b>{html.escape(product.title)}</b>\n\n{html.escape(product.description)}\n\nЦена: <b>{product_price(product)}</b>\nСтатус: {'показывается' if product.is_active else 'скрыт'}",
+                screen(
+                    product.emoji,
+                    html.escape(product.title),
+                    f"{html.escape(product.description)}\n\n"
+                    f"💳 Цена: <b>{product_price(product)}</b>\n"
+                    f"👁 Статус: <b>{'показывается' if product.is_active else 'скрыт'}</b>",
+                ),
                 reply_markup=admin_product_keyboard(product),
             )
     elif action[1] == "toggle":
@@ -586,17 +685,28 @@ async def admin_callbacks(callback: CallbackQuery, state: FSMContext) -> None:
             if product:
                 product.is_active = not product.is_active
                 await session.commit()
+                await callback.message.edit_reply_markup(reply_markup=admin_product_keyboard(product))
         await callback.answer("Статус изменён", show_alert=True)
         return
     elif action[1] == "add":
         await state.set_state(AdminAddForm.title)
-        await callback.message.answer("➕ <b>Новый товар</b>\n\nВведите название товара:")
+        await callback.message.answer(
+            screen("✨", "Новый товар · 1/4", "Введите короткое и понятное название."),
+            reply_markup=admin_cancel_keyboard(),
+        )
+    elif action[1] == "kind":
+        kind = action[2] if len(action) > 2 else ""
+        await finish_admin_product(callback.message, state, kind)
     elif action[1] == "edit":
         field, product_id = action[2], int(action[3])
         await state.set_state(AdminEditForm.value)
         await state.update_data(field=field, product_id=product_id)
-        prompts = {"rub": "Введите новую цену для СБП в рублях (больше 0):", "stars": "Введите новую цену в Stars (больше 0):", "text": "Введите <code>Название | Описание</code>:"}
-        await callback.message.answer(prompts[field])
+        prompts = {
+            "rub": screen("⚡", "Цена СБП", "Введите сумму в рублях, например: <code>990</code>"),
+            "stars": screen("⭐", "Цена Stars", "Введите количество звёзд, например: <code>350</code>"),
+            "text": screen("✏️", "Название и описание", "Формат: <code>Название | Описание</code>"),
+        }
+        await callback.message.answer(prompts[field], reply_markup=admin_cancel_keyboard())
     await callback.answer()
 
 
@@ -640,9 +750,12 @@ async def support_admin_callbacks(callback: CallbackQuery, state: FSMContext) ->
         await state.set_state(SupportReplyForm.content)
         await state.update_data(ticket_id=ticket.id)
         await callback.message.answer(
-            f"✉️ <b>Ответ на обращение #{ticket.id}</b>\n\n"
-            "Отправьте текст, фотографию, видео, документ или голосовое сообщение. "
-            "Только следующее сообщение будет доставлено покупателю.",
+            screen(
+                "✉️",
+                f"Ответ · обращение #{ticket.id}",
+                "Отправьте текст или вложение. Покупателю уйдёт только следующее сообщение.",
+                "Можно отменить действие кнопкой ниже",
+            ),
             reply_markup=support_cancel_keyboard(),
         )
     elif operation in {"close", "reopen"}:
@@ -660,12 +773,12 @@ async def support_admin_reply(message: Message, state: FSMContext) -> None:
         return
     if message.content_type not in SUPPORT_CONTENT_TYPES:
         await message.answer(
-            "Можно отправить текст, фотографию, видео, документ или голосовое сообщение.",
+            warning("Формат не поддерживается", "Отправьте текст, фото, видео, документ или голосовое."),
             reply_markup=support_cancel_keyboard(),
         )
         return
     if message.content_type == ContentType.TEXT and not support_message_body(message):
-        await message.answer("Ответ не должен быть пустым.", reply_markup=support_cancel_keyboard())
+        await message.answer(warning("Пустой ответ", "Напишите сообщение или прикрепите файл."), reply_markup=support_cancel_keyboard())
         return
 
     data = await state.get_data()
@@ -674,18 +787,22 @@ async def support_admin_reply(message: Message, state: FSMContext) -> None:
         ticket = await session.get(SupportTicket, ticket_id)
     if ticket is None:
         await state.clear()
-        await message.answer("Обращение больше не найдено.")
+        await message.answer(warning("Обращение не найдено", "Возможно, оно было удалено."))
         return
     if ticket.status == SupportStatus.CLOSED.value:
         await state.clear()
-        await message.answer("Обращение уже закрыто. Сначала откройте его снова.")
+        await message.answer(warning("Обращение закрыто", "Сначала откройте его снова в админ-панели."))
         return
 
     try:
         await message.bot.send_message(
             ticket.user_id,
-            f"💬 <b>Ответ поддержки LIMYZINOV SHOP</b>\n\n"
-            f"Обращение: <code>#{ticket.id}</code>",
+            screen(
+                "💬",
+                "Ответ поддержки",
+                f"Обращение: <code>#{ticket.id}</code>",
+                "LIMYZINOV SHOP",
+            ),
             reply_markup=main_keyboard(False),
         )
         delivered = await message.copy_to(ticket.user_id)
@@ -693,7 +810,7 @@ async def support_admin_reply(message: Message, state: FSMContext) -> None:
         await state.clear()
         logger.warning("Could not deliver support reply for ticket %s: %s", ticket.id, exc)
         await message.answer(
-            "⚠️ Не удалось доставить ответ. Возможно, пользователь заблокировал бота.",
+            warning("Ответ не доставлен", "Возможно, пользователь заблокировал бота."),
             reply_markup=support_ticket_keyboard(ticket),
         )
         return
@@ -714,7 +831,7 @@ async def support_admin_reply(message: Message, state: FSMContext) -> None:
 
     await state.clear()
     await message.answer(
-        f"✅ Ответ по обращению <code>#{ticket.id}</code> доставлен.",
+        success("Ответ доставлен", f"Обращение: <code>#{ticket.id}</code>"),
         reply_markup=support_ticket_keyboard(ticket),
     )
 
@@ -723,18 +840,37 @@ async def support_admin_reply(message: Message, state: FSMContext) -> None:
 async def admin_add_title(message: Message, state: FSMContext) -> None:
     if not is_admin(message.from_user.id) or not message.text:
         return
-    await state.update_data(title=message.text.strip())
+    title = message.text.strip()
+    if not title:
+        await message.answer(warning("Нужно название", "Введите хотя бы один символ."), reply_markup=admin_cancel_keyboard())
+        return
+    await state.update_data(title=title[:255])
     await state.set_state(AdminAddForm.description)
-    await message.answer("Введите описание товара:")
+    await message.answer(
+        screen("✨", "Новый товар · 2/4", "Расскажите коротко, что получает покупатель."),
+        reply_markup=admin_cancel_keyboard(),
+    )
 
 
 @router.message(AdminAddForm.description)
 async def admin_add_description(message: Message, state: FSMContext) -> None:
     if not is_admin(message.from_user.id) or not message.text:
         return
-    await state.update_data(description=message.text.strip())
+    description = message.text.strip()
+    if not description:
+        await message.answer(warning("Нужно описание", "Коротко опишите товар."), reply_markup=admin_cancel_keyboard())
+        return
+    await state.update_data(description=description[:4000])
     await state.set_state(AdminAddForm.prices)
-    await message.answer("Введите обе цены в формате <code>СБП в рублях / Stars</code>.\nНапример: <code>990 / 350</code>.")
+    await message.answer(
+        screen(
+            "✨",
+            "Новый товар · 3/4",
+            "Введите обе цены через слеш:\n\n<code>990 / 350</code>\n"
+            "⚡ сначала рубли   ⭐ затем Stars",
+        ),
+        reply_markup=admin_cancel_keyboard(),
+    )
 
 
 @router.message(AdminAddForm.prices)
@@ -746,11 +882,17 @@ async def admin_add_prices(message: Message, state: FSMContext) -> None:
         if rub <= 0 or stars <= 0:
             raise ValueError
     except ValueError:
-        await message.answer("Нужен формат <code>990 / 350</code>. Обе цены должны быть больше нуля.")
+        await message.answer(
+            warning("Проверьте цены", "Используйте формат <code>990 / 350</code>. Обе цены больше нуля."),
+            reply_markup=admin_cancel_keyboard(),
+        )
         return
     await state.update_data(price_rub=rub, price_stars=stars)
     await state.set_state(AdminAddForm.kind)
-    await message.answer("Введите тип товара: <code>physical</code> или <code>digital</code>.")
+    await message.answer(
+        screen("✨", "Новый товар · 4/4", "Выберите тип товара."),
+        reply_markup=product_kind_keyboard(),
+    )
 
 
 @router.message(AdminAddForm.kind)
@@ -759,25 +901,9 @@ async def admin_add_kind(message: Message, state: FSMContext) -> None:
         return
     kind = message.text.strip().lower()
     if kind not in {"physical", "digital"}:
-        await message.answer("Введите physical или digital.")
+        await message.answer(warning("Выберите тип кнопкой", "Физический или цифровой товар."), reply_markup=product_kind_keyboard())
         return
-    data = await state.get_data()
-    async with SessionLocal() as session:
-        product = Product(
-            key=f"item-{uuid4().hex[:10]}",
-            title=data["title"][:255],
-            description=data["description"],
-            price_rub=data["price_rub"],
-            price_stars=data["price_stars"],
-            emoji="🛍",
-            kind=kind,
-            requires_brief=False,
-        )
-        session.add(product)
-        await session.commit()
-        await session.refresh(product)
-    await state.clear()
-    await message.answer(f"✅ Товар <b>{html.escape(product.title)}</b> создан.", reply_markup=admin_product_keyboard(product))
+    await finish_admin_product(message, state, kind)
 
 
 @router.message(AdminEditForm.value)
@@ -790,7 +916,7 @@ async def admin_edit_value(message: Message, state: FSMContext) -> None:
         product = await get_product(session, product_id)
         if not product:
             await state.clear()
-            await message.answer("Товар не найден.")
+            await message.answer(warning("Товар не найден", "Вернитесь в список товаров."))
             return
         try:
             if field == "rub":
@@ -806,9 +932,15 @@ async def admin_edit_value(message: Message, state: FSMContext) -> None:
             if value <= 0 or not product.price_rub or not product.price_stars:
                 raise ValueError
         except (ValueError, TypeError):
-            await message.answer("Неверное значение. Для товара обязательны обе цены: СБП и Stars, обе больше нуля.")
+            await message.answer(
+                warning("Проверьте значение", "Для товара обязательны обе цены: СБП и Stars, обе больше нуля."),
+                reply_markup=admin_cancel_keyboard(),
+            )
             return
         await session.commit()
         await session.refresh(product)
     await state.clear()
-    await message.answer("✅ Товар обновлён.", reply_markup=admin_product_keyboard(product))
+    await message.answer(
+        success("Товар обновлён", f"{product.emoji} <b>{html.escape(product.title)}</b>\n💳 {product_price(product)}"),
+        reply_markup=admin_product_keyboard(product),
+    )
