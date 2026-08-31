@@ -13,6 +13,7 @@ from app.config import get_settings
 from app.db import init_db
 from app.handlers import router
 from app.rewards_routes import router as rewards_router
+from app.analytics_routes import router as analytics_router
 from app.web import create_web_app
 
 
@@ -24,6 +25,7 @@ async def main() -> None:
     dp = Dispatcher()
     dp.include_router(router)
     dp.include_router(rewards_router)
+    dp.include_router(analytics_router)
 
     await init_db()
     await bot.set_my_commands(
@@ -35,6 +37,7 @@ async def main() -> None:
             BotCommand(command="bonus", description="💎 Бонусы"),
             BotCommand(command="referral", description="👥 Рефералы"),
             BotCommand(command="promo", description="🎁 Промокод"),
+            BotCommand(command="stats", description="📊 Аналитика"),
         ]
     )
 
