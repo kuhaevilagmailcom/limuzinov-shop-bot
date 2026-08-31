@@ -101,6 +101,11 @@ async def init_db() -> None:
                         requires_brief=seed.requires_brief,
                     )
                 )
+        await session.execute(
+            update(Product)
+            .where(Product.description == "Фирменная футболка Limuzinov Shop.")
+            .values(description="Фирменная футболка Limyzinov Shop.")
+        )
         await session.commit()
 
 

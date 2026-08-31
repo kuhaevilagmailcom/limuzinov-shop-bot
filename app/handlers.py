@@ -83,7 +83,7 @@ async def ensure_user(message: Message) -> User:
 
 def menu_text(user: User) -> str:
     return (
-        "✨ <b>LIMUZINOV SHOP</b>\n"
+        "✨ <b>LIMYZINOV SHOP</b>\n"
         "<i>Музыка и фирменные вещи</i>\n\n"
         f"Рады видеть, <b>{html.escape(user.full_name)}</b>.\n"
         f"У вас покупок: <b>{user.purchases_count}</b>\n\n"
@@ -105,7 +105,7 @@ async def start(message: Message, state: FSMContext) -> None:
 async def send_catalog(message: Message, *, edit: bool = False) -> None:
     async with SessionLocal() as session:
         products = await active_products(session)
-    text = "🛍 <b>Витрина LIMUZINOV</b>\n\nПесня теперь тоже здесь — как обычный товар. Выберите позицию:"
+    text = "🛍 <b>Витрина LIMYZINOV</b>\n\nПесня теперь тоже здесь — как обычный товар. Выберите позицию:"
     if not products:
         text = "🛍 Каталог пока пуст. Скоро здесь появятся товары."
     if edit:
@@ -180,7 +180,7 @@ async def send_payment(
             await bot.send_invoice(
                 chat_id=message.chat.id,
                 title=product.title[:32],
-                description=(product.description.strip() or "Заказ в LIMUZINOV SHOP")[:255],
+                description=(product.description.strip() or "Заказ в LIMYZINOV SHOP")[:255],
                 payload=f"order:{order.id}",
                 currency="XTR",
                 prices=[LabeledPrice(label=product.title[:32], amount=product.price_stars)],

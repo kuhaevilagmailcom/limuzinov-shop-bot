@@ -43,7 +43,7 @@ PRODUCT_SEEDS: tuple[SeedProduct, ...] = (
     SeedProduct(
         key="merch",
         title="Футболка",
-        description="Фирменная футболка Limuzinov Shop.",
+        description="Фирменная футболка Limyzinov Shop.",
         price_rub=2490,
         price_stars=None,
         emoji="👕",

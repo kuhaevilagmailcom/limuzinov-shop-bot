@@ -29,7 +29,7 @@ def _same_amount(received: object, expected: Decimal | None) -> bool:
         return False
 
 
-def _shell(content: str, title: str = "LIMUZINOV SHOP") -> str:
+def _shell(content: str, title: str = "LIMYZINOV SHOP") -> str:
     return f"""<!doctype html><html lang="ru" data-theme="dark"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="theme-color" content="#08090d"><title>{html.escape(title)}</title><style>
@@ -47,7 +47,7 @@ h1{{font-size:clamp(48px,9vw,104px);line-height:.91;letter-spacing:-.07em;margin
 footer{{border-top:1px solid var(--line);padding:24px 0 36px;color:var(--muted);font-size:13px}}.result{{max-width:650px;margin:12vh auto;padding:38px;text-align:center;border:1px solid var(--line);border-radius:28px;background:var(--card);backdrop-filter:blur(24px)}}.result h1{{font-size:clamp(34px,7vw,58px);line-height:1}}.result p{{color:var(--muted);line-height:1.6}}
 @media(max-width:760px){{.hero-layout,.grid{{grid-template-columns:1fr}}main{{padding-top:5vh}}.hero-art{{order:-1}}.card p{{min-height:0}}}}@media(prefers-reduced-motion:reduce){{*{{transition:none!important;animation:none!important}}}}
 </style></head><body><div class="wrap">{content}</div><script>
-const r=document.documentElement,b=[...document.querySelectorAll('[data-theme-set]')];function a(v){{const t=v==='system'?(matchMedia('(prefers-color-scheme:light)').matches?'light':'dark'):v;r.dataset.theme=t;b.forEach(x=>x.classList.toggle('on',x.dataset.themeSet===v))}}const s=localStorage.getItem('limuzinov-theme')||'system';a(s);b.forEach(x=>x.onclick=()=>{{localStorage.setItem('limuzinov-theme',x.dataset.themeSet);a(x.dataset.themeSet)}})
+const r=document.documentElement,b=[...document.querySelectorAll('[data-theme-set]')];function a(v){{const t=v==='system'?(matchMedia('(prefers-color-scheme:light)').matches?'light':'dark'):v;r.dataset.theme=t;b.forEach(x=>x.classList.toggle('on',x.dataset.themeSet===v))}}const s=localStorage.getItem('limyzinov-theme')||'system';a(s);b.forEach(x=>x.onclick=()=>{{localStorage.setItem('limyzinov-theme',x.dataset.themeSet);a(x.dataset.themeSet)}})
 </script></body></html>"""
 
 
@@ -66,7 +66,7 @@ def _storefront(username: str, products: list[Product]) -> str:
         f'<article class="card"><div class="emoji">{html.escape(p.emoji)}</div><h3>{html.escape(p.title)}</h3><p>{html.escape(p.description)}</p><div class="price"><span>{_price(p)}</span><small>В БОТЕ →</small></div></article>'
         for p in products
     )
-    return _shell(f"""<header><div class="logo">LIMUZINOV<span>.</span>SHOP</div><div class="theme"><button data-theme-set="light" title="Светлая">☀</button><button data-theme-set="dark" title="Тёмная">☾</button><button data-theme-set="system" title="Системная">◐</button></div></header><main><div class="hero-layout"><div><div class="badge"><span class="dot"></span> Магазин открыт 24/7</div><h1>Не просто вещи.<br><span class="grad">Это твой вайб.</span></h1><p class="lead">Фирменный мерч и персональная музыка. Выбрал в Telegram, оплатил удобным способом — готово.</p><div class="actions"><a class="btn primary" href="{url}">Открыть магазин в Telegram&nbsp; ↗</a><a class="btn" href="#catalog">Смотреть каталог</a></div></div><div class="hero-art"><img src="/static/brand/hero.png" alt="Логотип LIMUZINOV SHOP" width="1536" height="1024"></div></div><section id="catalog"><div class="section-title"><h2>Витрина</h2><span class="badge">₽ · ⭐ · ₿</span></div><div class="grid">{cards}</div></section></main><footer>© LIMUZINOV SHOP · Оплата и статус заказа доступны в Telegram</footer>""")
+    return _shell(f"""<header><div class="logo">LIMYZINOV<span>.</span>SHOP</div><div class="theme"><button data-theme-set="light" title="Светлая">☀</button><button data-theme-set="dark" title="Тёмная">☾</button><button data-theme-set="system" title="Системная">◐</button></div></header><main><div class="hero-layout"><div><div class="badge"><span class="dot"></span> Магазин открыт 24/7</div><h1>Не просто вещи.<br><span class="grad">Это твой вайб.</span></h1><p class="lead">Фирменный мерч и персональная музыка. Выбрал в Telegram, оплатил удобным способом — готово.</p><div class="actions"><a class="btn primary" href="{url}">Открыть магазин в Telegram&nbsp; ↗</a><a class="btn" href="#catalog">Смотреть каталог</a></div></div><div class="hero-art"><img src="/static/brand/hero.png" alt="Логотип LIMYZINOV SHOP" width="1536" height="1024"></div></div><section id="catalog"><div class="section-title"><h2>Витрина</h2><span class="badge">₽ · ⭐ · ₿</span></div><div class="grid">{cards}</div></section></main><footer>© LIMYZINOV SHOP · Оплата и статус заказа доступны в Telegram</footer>""")
 
 
 def _result(ok: bool, username: str) -> str:
@@ -76,7 +76,7 @@ def _result(ok: bool, username: str) -> str:
 
 
 def create_web_app(bot: Bot, bot_username: str) -> FastAPI:
-    app = FastAPI(title="LIMUZINOV SHOP", docs_url=None, redoc_url=None)
+    app = FastAPI(title="LIMYZINOV SHOP", docs_url=None, redoc_url=None)
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     @app.middleware("http")

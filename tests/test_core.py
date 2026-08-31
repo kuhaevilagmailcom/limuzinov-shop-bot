@@ -19,7 +19,7 @@ class CoreTests(unittest.TestCase):
         product = SimpleNamespace(emoji="🎵", title="Создать песню", description="Описание", price_rub=None, price_stars=350)
         page = _storefront('safe" onclick="alert(1)', [product])
         self.assertNotIn('onclick="alert(1)', page)
-        self.assertIn("LIMUZINOV", page)
+        self.assertIn("LIMYZINOV", page)
         self.assertIn("350 ⭐", page)
         self.assertIn("/static/brand/hero.png", page)
 
