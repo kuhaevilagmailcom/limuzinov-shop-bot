@@ -1,15 +1,18 @@
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 
 from app.config import get_settings
-from app.db import Product
+from app.db import Product, SupportStatus, SupportTicket
 
 
-def main_keyboard() -> ReplyKeyboardMarkup:
+def main_keyboard(admin: bool = False) -> ReplyKeyboardMarkup:
+    rows = [
+        [KeyboardButton(text="🛍 Каталог"), KeyboardButton(text="📦 Мои покупки")],
+        [KeyboardButton(text="👤 Профиль"), KeyboardButton(text="🆘 Поддержка")],
+    ]
+    if admin:
+        rows.append([KeyboardButton(text="⚙️ Админ-панель")])
     return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="🛍 Каталог"), KeyboardButton(text="📦 Мои покупки")],
-            [KeyboardButton(text="👤 Профиль"), KeyboardButton(text="🆘 Поддержка")],
-        ],
+        keyboard=rows,
         resize_keyboard=True,
         input_field_placeholder="Выберите действие…",
     )
@@ -63,6 +66,11 @@ def admin_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="📦 Управление товарами", callback_data="admin:products")],
             [InlineKeyboardButton(text="➕ Создать товар", callback_data="admin:add")],
+            [InlineKeyboardButton(text="🆘 Новые обращения", callback_data="admin:support:new")],
+            [
+                InlineKeyboardButton(text="📂 Все обращения", callback_data="admin:support:all"),
+                InlineKeyboardButton(text="✅ Закрытые", callback_data="admin:support:closed"),
+            ],
         ]
     )
 
@@ -89,3 +97,38 @@ def admin_product_keyboard(product: Product) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="← К товарам", callback_data="admin:products")],
         ]
     )
+
+
+def support_cancel_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="✖️ Отменить обращение", callback_data="support:cancel")]]
+    )
+
+
+def support_ticket_keyboard(ticket: SupportTicket) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if ticket.status != SupportStatus.CLOSED.value:
+        rows.append([InlineKeyboardButton(text="✉️ Ответить", callback_data=f"support:reply:{ticket.id}")])
+        rows.append([InlineKeyboardButton(text="✅ Закрыть обращение", callback_data=f"support:close:{ticket.id}")])
+    else:
+        rows.append([InlineKeyboardButton(text="↩️ Открыть снова", callback_data=f"support:reopen:{ticket.id}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def support_tickets_keyboard(tickets: list[SupportTicket], scope: str) -> InlineKeyboardMarkup:
+    status_icons = {
+        SupportStatus.NEW.value: "🆘",
+        SupportStatus.ANSWERED.value: "💬",
+        SupportStatus.CLOSED.value: "✅",
+    }
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=f"{status_icons.get(ticket.status, '•')} #{ticket.id} · {(ticket.full_name or str(ticket.user_id))[:24]}",
+                callback_data=f"support:ticket:{ticket.id}:{scope}",
+            )
+        ]
+        for ticket in tickets
+    ]
+    rows.append([InlineKeyboardButton(text="← Админ-панель", callback_data="admin:home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)

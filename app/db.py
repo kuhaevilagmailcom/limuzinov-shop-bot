@@ -28,6 +28,12 @@ class OrderStatus(StrEnum):
     CHARGEBACK = "chargeback"
 
 
+class SupportStatus(StrEnum):
+    NEW = "new"
+    ANSWERED = "answered"
+    CLOSED = "closed"
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -71,6 +77,32 @@ class Order(Base):
     status: Mapped[str] = mapped_column(String(32), default=OrderStatus.CREATED.value, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class SupportTicket(Base):
+    __tablename__ = "support_tickets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    username: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    full_name: Mapped[str] = mapped_column(String(255), default="")
+    status: Mapped[str] = mapped_column(String(32), default=SupportStatus.NEW.value, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    last_message_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class SupportMessage(Base):
+    __tablename__ = "support_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ticket_id: Mapped[int] = mapped_column(Integer, index=True)
+    sender: Mapped[str] = mapped_column(String(16))  # user | admin
+    content_type: Mapped[str] = mapped_column(String(32))
+    body: Mapped[str] = mapped_column(Text, default="")
+    source_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    delivered_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
 
 
 settings = get_settings()
@@ -240,3 +272,115 @@ async def get_product(session: AsyncSession, product_id: int) -> Product | None:
 
 async def get_product_by_key(session: AsyncSession, key: str) -> Product | None:
     return await session.scalar(select(Product).where(Product.key == key))
+
+
+async def get_active_support_ticket(session: AsyncSession, user_id: int) -> SupportTicket | None:
+    return await session.scalar(
+        select(SupportTicket)
+        .where(SupportTicket.user_id == user_id, SupportTicket.status != SupportStatus.CLOSED.value)
+        .order_by(SupportTicket.id.desc())
+        .limit(1)
+    )
+
+
+async def create_support_ticket(
+    session: AsyncSession,
+    *,
+    user_id: int,
+    username: str | None,
+    full_name: str,
+) -> SupportTicket:
+    ticket = SupportTicket(user_id=user_id, username=username, full_name=full_name)
+    session.add(ticket)
+    await session.commit()
+    await session.refresh(ticket)
+    return ticket
+
+
+async def add_support_message(
+    session: AsyncSession,
+    *,
+    ticket: SupportTicket,
+    sender: str,
+    content_type: str,
+    body: str = "",
+    source_message_id: int | None = None,
+    delivered_message_id: int | None = None,
+) -> SupportMessage:
+    now = datetime.now(timezone.utc)
+    item = SupportMessage(
+        ticket_id=ticket.id,
+        sender=sender,
+        content_type=content_type[:32],
+        body=body[:4000],
+        source_message_id=source_message_id,
+        delivered_message_id=delivered_message_id,
+        created_at=now,
+    )
+    session.add(item)
+    ticket.last_message_at = now
+    if sender == "user":
+        ticket.status = SupportStatus.NEW.value
+        ticket.closed_at = None
+    elif sender == "admin":
+        ticket.status = SupportStatus.ANSWERED.value
+    await session.commit()
+    await session.refresh(item)
+    return item
+
+
+async def support_rate_limited(session: AsyncSession, user_id: int, seconds: int = 10) -> bool:
+    last_sent = await session.scalar(
+        select(SupportMessage.created_at)
+        .join(SupportTicket, SupportTicket.id == SupportMessage.ticket_id)
+        .where(SupportTicket.user_id == user_id, SupportMessage.sender == "user")
+        .order_by(SupportMessage.created_at.desc())
+        .limit(1)
+    )
+    if last_sent is None:
+        return False
+    if last_sent.tzinfo is None:
+        last_sent = last_sent.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - last_sent).total_seconds() < seconds
+
+
+async def list_support_tickets(
+    session: AsyncSession,
+    *,
+    status: str | None = None,
+    limit: int = 30,
+) -> list[SupportTicket]:
+    query = select(SupportTicket)
+    if status:
+        query = query.where(SupportTicket.status == status)
+    result = await session.execute(query.order_by(SupportTicket.last_message_at.desc()).limit(limit))
+    return list(result.scalars())
+
+
+async def support_ticket_messages(
+    session: AsyncSession,
+    ticket_id: int,
+    limit: int = 20,
+) -> list[SupportMessage]:
+    result = await session.execute(
+        select(SupportMessage)
+        .where(SupportMessage.ticket_id == ticket_id)
+        .order_by(SupportMessage.created_at.desc())
+        .limit(limit)
+    )
+    return list(reversed(result.scalars().all()))
+
+
+async def set_support_ticket_status(
+    session: AsyncSession,
+    ticket_id: int,
+    status: SupportStatus,
+) -> SupportTicket | None:
+    ticket = await session.get(SupportTicket, ticket_id)
+    if ticket is None:
+        return None
+    ticket.status = status.value
+    ticket.closed_at = datetime.now(timezone.utc) if status == SupportStatus.CLOSED else None
+    await session.commit()
+    await session.refresh(ticket)
+    return ticket

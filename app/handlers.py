@@ -7,26 +7,38 @@ from pathlib import Path
 from uuid import uuid4
 
 from aiogram import Bot, F, Router
+from aiogram.enums import ContentType
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, FSInputFile, LabeledPrice, Message, PreCheckoutQuery
 from sqlalchemy import func, select
 
-from app.config import get_settings
+from app.config import OWNER_ADMIN_ID, get_settings
 from app.db import (
     Order,
     OrderStatus,
     Product,
     SessionLocal,
+    SupportMessage,
+    SupportStatus,
+    SupportTicket,
     User,
     active_products,
+    add_support_message,
     all_products,
     create_order,
+    create_support_ticket,
+    get_active_support_ticket,
     get_or_create_user,
     get_product,
+    list_support_tickets,
     mark_order_paid,
     recent_orders,
+    set_support_ticket_status,
+    support_ticket_messages,
+    support_rate_limited,
 )
 from app.keyboards import (
     admin_keyboard,
@@ -37,9 +49,11 @@ from app.keyboards import (
     payment_url_keyboard,
     product_keyboard,
     product_price,
+    support_cancel_keyboard,
+    support_ticket_keyboard,
+    support_tickets_keyboard,
 )
 from app.notifications import notify_order_paid
-from app.payments.cryptopay import CryptoPayError, create_invoice, get_invoice
 from app.payments.rollypay import RollyPayError, create_payment, get_payment
 
 router = Router()
@@ -63,12 +77,78 @@ class AdminEditForm(StatesGroup):
     value = State()
 
 
+class SupportUserForm(StatesGroup):
+    content = State()
+
+
+class SupportReplyForm(StatesGroup):
+    content = State()
+
+
+SUPPORT_CONTENT_TYPES = {
+    ContentType.TEXT,
+    ContentType.PHOTO,
+    ContentType.VIDEO,
+    ContentType.DOCUMENT,
+    ContentType.VOICE,
+}
+
+
 def money(value: Decimal) -> str:
     return f"{value:.2f}".replace(".00", "")
 
 
 def is_admin(user_id: int) -> bool:
     return user_id in settings.admins
+
+
+def is_support_admin(user_id: int) -> bool:
+    return user_id == OWNER_ADMIN_ID
+
+
+def support_message_body(message: Message) -> str:
+    return (message.text or message.caption or "").strip()[:4000]
+
+
+def support_content_type(message: Message) -> str:
+    return message.content_type.value if hasattr(message.content_type, "value") else str(message.content_type)
+
+
+def support_ticket_text(ticket: SupportTicket) -> str:
+    username = f"@{html.escape(ticket.username)}" if ticket.username else "не указан"
+    labels = {
+        SupportStatus.NEW.value: "🆘 новое",
+        SupportStatus.ANSWERED.value: "💬 дан ответ",
+        SupportStatus.CLOSED.value: "✅ закрыто",
+    }
+    return (
+        f"🆘 <b>Обращение #{ticket.id}</b>\n\n"
+        f"Статус: <b>{labels.get(ticket.status, ticket.status)}</b>\n"
+        f"Пользователь: <b>{html.escape(ticket.full_name)}</b>\n"
+        f"Username: {username}\n"
+        f"Telegram ID: <code>{ticket.user_id}</code>\n"
+        f"Создано: <code>{ticket.created_at:%d.%m.%Y %H:%M}</code>"
+    )
+
+
+def support_history_text(messages: list[SupportMessage]) -> str:
+    if not messages:
+        return "\n\nИстория пока пуста."
+    content_labels = {
+        "photo": "[фотография]",
+        "video": "[видео]",
+        "document": "[документ]",
+        "voice": "[голосовое сообщение]",
+    }
+    rows = ["\n\n<b>Последние сообщения:</b>"]
+    for item in messages:
+        sender = "👤 Покупатель" if item.sender == "user" else "👑 Вы"
+        body = html.escape(item.body[:350]) if item.body else content_labels.get(item.content_type, f"[{html.escape(item.content_type)}]")
+        rows.append(f"\n{sender}: {body}")
+        if sum(len(row) for row in rows) > 3000:
+            rows.append("\n…")
+            break
+    return "".join(rows)
 
 
 async def ensure_user(message: Message) -> User:
@@ -84,7 +164,7 @@ async def ensure_user(message: Message) -> User:
 def menu_text(user: User) -> str:
     return (
         "✨ <b>LIMYZINOV SHOP</b>\n"
-        "<i>Музыка и фирменные вещи</i>\n\n"
+        "<i>Удобные покупки прямо в Telegram</i>\n\n"
         f"Рады видеть, <b>{html.escape(user.full_name)}</b>.\n"
         f"У вас покупок: <b>{user.purchases_count}</b>\n\n"
         "Откройте каталог и выберите свой вайб ↓"
@@ -97,9 +177,9 @@ async def start(message: Message, state: FSMContext) -> None:
     await state.clear()
     user = await ensure_user(message)
     if BOT_COVER.exists():
-        await message.answer_photo(FSInputFile(BOT_COVER), caption=menu_text(user), reply_markup=main_keyboard())
+        await message.answer_photo(FSInputFile(BOT_COVER), caption=menu_text(user), reply_markup=main_keyboard(is_admin(message.from_user.id)))
     else:
-        await message.answer(menu_text(user), reply_markup=main_keyboard())
+        await message.answer(menu_text(user), reply_markup=main_keyboard(is_admin(message.from_user.id)))
 
 
 async def send_catalog(message: Message, *, edit: bool = False) -> None:
@@ -153,6 +233,9 @@ async def send_payment(
     provider: str,
     brief: str = "",
 ) -> None:
+    if provider not in {"rolly", "stars"}:
+        await message.answer("Этот способ оплаты недоступен.")
+        return
     async with SessionLocal() as session:
         product = await get_product(session, product_id)
         if not product or not product.is_active:
@@ -192,18 +275,12 @@ async def send_payment(
             await message.answer("Рублёвая цена для этого товара не настроена.")
             return
         try:
-            if provider == "rolly":
-                payment = await create_payment(order.id, Decimal(product.price_rub), f"{product.title} / заказ {order.id[:8]}", user_id)
-                order.payment_method = "rollypay"
-                order.provider_payment_id = str(payment.get("payment_id", ""))
-                pay_url = payment["pay_url"]
-            else:
-                payment = await create_invoice(order.id, Decimal(product.price_rub), f"{product.title} / заказ {order.id[:8]}")
-                order.payment_method = "cryptopay"
-                order.provider_payment_id = str(payment.get("invoice_id", ""))
-                pay_url = payment["bot_invoice_url"]
+            payment = await create_payment(order.id, Decimal(product.price_rub), f"{product.title} / заказ {order.id[:8]}", user_id)
+            order.payment_method = "rollypay"
+            order.provider_payment_id = str(payment.get("payment_id", ""))
+            pay_url = payment["pay_url"]
             await session.commit()
-        except (RollyPayError, CryptoPayError, KeyError) as exc:
+        except (RollyPayError, KeyError) as exc:
             logger.exception("Payment creation failed for order %s: %s", order.id, exc)
             await message.answer("⚠️ Платёжная страница сейчас не ответила. Попробуйте ещё раз через минуту.")
             return
@@ -275,13 +352,6 @@ async def check_status(callback: CallbackQuery) -> None:
                     order, changed = await mark_order_paid(session, order.id, payment_method="rollypay", provider_payment_id=order.provider_payment_id)
                 else:
                     changed = False
-            elif order.payment_method == "cryptopay" and order.provider_payment_id:
-                invoice = await get_invoice(order.provider_payment_id)
-                matches = invoice and str(invoice.get("payload", "")) == order.id and str(invoice.get("invoice_id", "")) == order.provider_payment_id and str(invoice.get("fiat", "")).upper() == "RUB" and Decimal(str(invoice.get("amount", "0"))) == order.amount_rub
-                if invoice and invoice.get("status") == "paid" and matches:
-                    order, changed = await mark_order_paid(session, order.id, payment_method="cryptopay", provider_payment_id=order.provider_payment_id)
-                else:
-                    changed = False
             else:
                 changed = False
             if changed:
@@ -289,7 +359,7 @@ async def check_status(callback: CallbackQuery) -> None:
                 await notify_order_paid(callback.bot, order, notify_customer=False)
                 await callback.answer("Оплачено", show_alert=True)
                 return
-        except (RollyPayError, CryptoPayError, ValueError, ArithmeticError):
+        except (RollyPayError, ValueError, ArithmeticError):
             logger.exception("Could not verify order %s", order.id)
     await callback.answer("Платёж пока не подтверждён", show_alert=True)
 
@@ -348,8 +418,87 @@ async def my_orders(message: Message) -> None:
 
 @router.message(F.text == "🆘 Поддержка")
 @router.message(Command("paysupport"))
-async def support(message: Message) -> None:
-    await message.answer("🆘 <b>Поддержка</b>\n\nОтправьте администратору номер заказа из раздела «Мои покупки» и коротко опишите проблему.")
+async def support(message: Message, state: FSMContext) -> None:
+    await ensure_user(message)
+    await state.set_state(SupportUserForm.content)
+    await message.answer(
+        "🆘 <b>Поддержка LIMYZINOV SHOP</b>\n\n"
+        "Отправьте одним сообщением текст, фотографию, видео, документ или голосовое сообщение. "
+        "Оно сразу придёт администратору.",
+        reply_markup=support_cancel_keyboard(),
+    )
+
+
+@router.callback_query(F.data == "support:cancel")
+async def support_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await callback.message.answer(
+        "Обращение отменено.",
+        reply_markup=main_keyboard(is_admin(callback.from_user.id)),
+    )
+    await callback.answer()
+
+
+@router.message(SupportUserForm.content)
+async def support_receive(message: Message, state: FSMContext) -> None:
+    if message.content_type not in SUPPORT_CONTENT_TYPES:
+        await message.answer(
+            "Можно отправить текст, фотографию, видео, документ или голосовое сообщение.",
+            reply_markup=support_cancel_keyboard(),
+        )
+        return
+    if message.content_type == ContentType.TEXT and not support_message_body(message):
+        await message.answer("Сообщение не должно быть пустым.", reply_markup=support_cancel_keyboard())
+        return
+
+    async with SessionLocal() as session:
+        user = await get_or_create_user(
+            session,
+            telegram_id=message.from_user.id,
+            username=message.from_user.username,
+            full_name=message.from_user.full_name,
+        )
+        if await support_rate_limited(session, user.telegram_id):
+            await message.answer("Слишком часто. Подождите 10 секунд и отправьте сообщение ещё раз.")
+            return
+        ticket = await get_active_support_ticket(session, user.telegram_id)
+        if ticket is None:
+            ticket = await create_support_ticket(
+                session,
+                user_id=user.telegram_id,
+                username=user.username,
+                full_name=user.full_name,
+            )
+        saved = await add_support_message(
+            session,
+            ticket=ticket,
+            sender="user",
+            content_type=support_content_type(message),
+            body=support_message_body(message),
+            source_message_id=message.message_id,
+        )
+
+    try:
+        await message.bot.send_message(OWNER_ADMIN_ID, support_ticket_text(ticket))
+        delivered = await message.copy_to(
+            OWNER_ADMIN_ID,
+            reply_markup=support_ticket_keyboard(ticket),
+        )
+        async with SessionLocal() as session:
+            stored = await session.get(SupportMessage, saved.id)
+            if stored:
+                stored.delivered_message_id = delivered.message_id
+                await session.commit()
+    except TelegramAPIError:
+        logger.exception("Could not deliver support ticket %s to owner", ticket.id)
+
+    await state.clear()
+    await message.answer(
+        f"✅ <b>Сообщение отправлено</b>\n\n"
+        f"Номер обращения: <code>#{ticket.id}</code>\n"
+        "Поддержка скоро ответит.",
+        reply_markup=main_keyboard(is_admin(message.from_user.id)),
+    )
 
 
 async def admin_home(target: Message) -> None:
@@ -358,7 +507,19 @@ async def admin_home(target: Message) -> None:
         orders_count = (await session.execute(select(func.count()).select_from(Order))).scalar_one()
         paid_count = (await session.execute(select(func.count()).select_from(Order).where(Order.status == "paid"))).scalar_one()
         products_count = (await session.execute(select(func.count()).select_from(Product))).scalar_one()
-    text = "🛠 <b>Админ-панель</b>\n\n" f"Товаров: <b>{products_count}</b>\nПользователей: <b>{users_count}</b>\nЗаказов: <b>{orders_count}</b>\nОплачено: <b>{paid_count}</b>"
+        support_count = (
+            await session.execute(
+                select(func.count()).select_from(SupportTicket).where(SupportTicket.status == SupportStatus.NEW.value)
+            )
+        ).scalar_one()
+    text = (
+        "🛠 <b>Админ-панель</b>\n\n"
+        f"Товаров: <b>{products_count}</b>\n"
+        f"Пользователей: <b>{users_count}</b>\n"
+        f"Заказов: <b>{orders_count}</b>\n"
+        f"Оплачено: <b>{paid_count}</b>\n"
+        f"Новых обращений: <b>{support_count}</b>"
+    )
     await target.answer(text, reply_markup=admin_keyboard())
 
 
@@ -368,6 +529,7 @@ async def show_id(message: Message) -> None:
 
 
 @router.message(Command("admin"))
+@router.message(F.text == "⚙️ Админ-панель")
 async def admin_panel(message: Message, state: FSMContext) -> None:
     await state.clear()
     if not is_admin(message.from_user.id):
@@ -388,6 +550,26 @@ async def admin_callbacks(callback: CallbackQuery, state: FSMContext) -> None:
         async with SessionLocal() as session:
             products = await all_products(session)
         await callback.message.answer("📦 <b>Товары</b>\n\nВыберите позицию:", reply_markup=admin_products_keyboard(products))
+    elif action[1] == "support":
+        if not is_support_admin(callback.from_user.id):
+            await callback.answer("Доступ только владельцу", show_alert=True)
+            return
+        scope = action[2] if len(action) > 2 else "new"
+        status = {
+            "new": SupportStatus.NEW.value,
+            "closed": SupportStatus.CLOSED.value,
+        }.get(scope)
+        async with SessionLocal() as session:
+            tickets = await list_support_tickets(session, status=status)
+        titles = {
+            "new": "🆘 <b>Новые обращения</b>",
+            "all": "📂 <b>Все обращения</b>",
+            "closed": "✅ <b>Закрытые обращения</b>",
+        }
+        text = titles.get(scope, titles["all"])
+        if not tickets:
+            text += "\n\nЗдесь пока пусто."
+        await callback.message.answer(text, reply_markup=support_tickets_keyboard(tickets, scope))
     elif action[1] == "product":
         async with SessionLocal() as session:
             product = await get_product(session, int(action[2]))
@@ -416,6 +598,125 @@ async def admin_callbacks(callback: CallbackQuery, state: FSMContext) -> None:
         prompts = {"rub": "Введите новую цену для СБП в рублях (больше 0):", "stars": "Введите новую цену в Stars (больше 0):", "text": "Введите <code>Название | Описание</code>:"}
         await callback.message.answer(prompts[field])
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("support:"))
+async def support_admin_callbacks(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_support_admin(callback.from_user.id):
+        await callback.answer("Доступ только владельцу", show_alert=True)
+        return
+    action = callback.data.split(":")
+    if len(action) < 3:
+        await callback.answer("Некорректная команда", show_alert=True)
+        return
+    operation = action[1]
+    try:
+        ticket_id = int(action[2])
+    except ValueError:
+        await callback.answer("Некорректный номер обращения", show_alert=True)
+        return
+    messages: list[SupportMessage] = []
+    async with SessionLocal() as session:
+        ticket = await session.get(SupportTicket, ticket_id)
+        if ticket is None:
+            await callback.answer("Обращение не найдено", show_alert=True)
+            return
+        if operation == "close":
+            ticket = await set_support_ticket_status(session, ticket_id, SupportStatus.CLOSED)
+        elif operation == "reopen":
+            ticket = await set_support_ticket_status(session, ticket_id, SupportStatus.NEW)
+        elif operation == "ticket":
+            messages = await support_ticket_messages(session, ticket_id)
+
+    if operation == "ticket":
+        await callback.message.answer(
+            support_ticket_text(ticket) + support_history_text(messages),
+            reply_markup=support_ticket_keyboard(ticket),
+        )
+    elif operation == "reply":
+        if ticket.status == SupportStatus.CLOSED.value:
+            await callback.answer("Сначала откройте обращение", show_alert=True)
+            return
+        await state.set_state(SupportReplyForm.content)
+        await state.update_data(ticket_id=ticket.id)
+        await callback.message.answer(
+            f"✉️ <b>Ответ на обращение #{ticket.id}</b>\n\n"
+            "Отправьте текст, фотографию, видео, документ или голосовое сообщение. "
+            "Только следующее сообщение будет доставлено покупателю.",
+            reply_markup=support_cancel_keyboard(),
+        )
+    elif operation in {"close", "reopen"}:
+        await callback.message.answer(support_ticket_text(ticket), reply_markup=support_ticket_keyboard(ticket))
+    else:
+        await callback.answer("Неизвестное действие", show_alert=True)
+        return
+    await callback.answer()
+
+
+@router.message(SupportReplyForm.content)
+async def support_admin_reply(message: Message, state: FSMContext) -> None:
+    if not is_support_admin(message.from_user.id):
+        await state.clear()
+        return
+    if message.content_type not in SUPPORT_CONTENT_TYPES:
+        await message.answer(
+            "Можно отправить текст, фотографию, видео, документ или голосовое сообщение.",
+            reply_markup=support_cancel_keyboard(),
+        )
+        return
+    if message.content_type == ContentType.TEXT and not support_message_body(message):
+        await message.answer("Ответ не должен быть пустым.", reply_markup=support_cancel_keyboard())
+        return
+
+    data = await state.get_data()
+    ticket_id = int(data["ticket_id"])
+    async with SessionLocal() as session:
+        ticket = await session.get(SupportTicket, ticket_id)
+    if ticket is None:
+        await state.clear()
+        await message.answer("Обращение больше не найдено.")
+        return
+    if ticket.status == SupportStatus.CLOSED.value:
+        await state.clear()
+        await message.answer("Обращение уже закрыто. Сначала откройте его снова.")
+        return
+
+    try:
+        await message.bot.send_message(
+            ticket.user_id,
+            f"💬 <b>Ответ поддержки LIMYZINOV SHOP</b>\n\n"
+            f"Обращение: <code>#{ticket.id}</code>",
+            reply_markup=main_keyboard(False),
+        )
+        delivered = await message.copy_to(ticket.user_id)
+    except TelegramAPIError as exc:
+        await state.clear()
+        logger.warning("Could not deliver support reply for ticket %s: %s", ticket.id, exc)
+        await message.answer(
+            "⚠️ Не удалось доставить ответ. Возможно, пользователь заблокировал бота.",
+            reply_markup=support_ticket_keyboard(ticket),
+        )
+        return
+
+    async with SessionLocal() as session:
+        stored_ticket = await session.get(SupportTicket, ticket.id)
+        if stored_ticket:
+            await add_support_message(
+                session,
+                ticket=stored_ticket,
+                sender="admin",
+                content_type=support_content_type(message),
+                body=support_message_body(message),
+                source_message_id=message.message_id,
+                delivered_message_id=delivered.message_id,
+            )
+            ticket = stored_ticket
+
+    await state.clear()
+    await message.answer(
+        f"✅ Ответ по обращению <code>#{ticket.id}</code> доставлен.",
+        reply_markup=support_ticket_keyboard(ticket),
+    )
 
 
 @router.message(AdminAddForm.title)

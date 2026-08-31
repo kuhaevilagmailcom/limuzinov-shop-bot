@@ -24,7 +24,6 @@ async def main() -> None:
     dp.include_router(router)
 
     await init_db()
-    me = await bot.get_me()
     await bot.set_my_commands(
         [
             BotCommand(command="start", description="Открыть магазин"),
@@ -34,7 +33,7 @@ async def main() -> None:
         ]
     )
 
-    web_app = create_web_app(bot, me.username or "")
+    web_app = create_web_app(bot)
     server = uvicorn.Server(
         uvicorn.Config(
             web_app,

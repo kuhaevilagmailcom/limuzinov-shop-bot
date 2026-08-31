@@ -21,7 +21,6 @@ class Settings(BaseSettings):
     admin_ids: str = ""
     database_url: str = DEFAULT_DATABASE_URL
 
-    public_base_url: str = ""
     web_host: str = "0.0.0.0"
     web_port: int = 8080
 
@@ -31,11 +30,7 @@ class Settings(BaseSettings):
     rollypay_signing_secret: str = ""
     rollypay_test_mode: bool = True
 
-    cryptopay_api_base: str = "https://pay.crypt.bot"
-    cryptopay_token: str = ""
-    cryptopay_webhook_secret: str = ""
-
-    @field_validator("public_base_url", "rollypay_api_base", "cryptopay_api_base")
+    @field_validator("rollypay_api_base")
     @classmethod
     def normalize_urls(cls, value: str) -> str:
         value = value.strip().rstrip("/")
@@ -53,10 +48,6 @@ class Settings(BaseSettings):
     @property
     def rollypay_enabled(self) -> bool:
         return _is_configured(self.rollypay_api_key) and _is_configured(self.rollypay_signing_secret)
-
-    @property
-    def cryptopay_enabled(self) -> bool:
-        return _is_configured(self.cryptopay_token)
 
 
 def _is_configured(value: str) -> bool:

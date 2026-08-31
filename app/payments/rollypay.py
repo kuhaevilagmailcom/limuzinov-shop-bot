@@ -34,8 +34,6 @@ async def create_payment(order_id: str, amount: Decimal, description: str, user_
         "order_id": order_id,
         "description": description[:255],
         "customer_id": str(user_id),
-        "success_redirect_url": f"{settings.public_base_url.rstrip('/')}/payment/success",
-        "fail_redirect_url": f"{settings.public_base_url.rstrip('/')}/payment/fail",
         "metadata": {"telegram_user_id": str(user_id)},
         "test": settings.rollypay_test_mode,
     }
