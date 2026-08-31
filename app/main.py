@@ -29,6 +29,8 @@ async def main() -> None:
         [
             BotCommand(command="start", description="Открыть магазин"),
             BotCommand(command="paysupport", description="Помощь с оплатой"),
+            BotCommand(command="id", description="Узнать свой Telegram ID"),
+            BotCommand(command="admin", description="Админ-панель"),
         ]
     )
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import html
 
 from aiogram import Bot
 
@@ -18,7 +19,7 @@ async def notify_order_paid(bot: Bot, order: Order, *, notify_customer: bool = T
             await bot.send_message(
                 order.user_id,
                 "✅ <b>Оплата подтверждена</b>\n\n"
-                f"{order.title}\n"
+                f"{html.escape(order.title)}\n"
                 f"Заказ: <code>{order.id}</code>\n\n"
                 "Мы уже получили заказ и скоро свяжемся с вами.",
             )
@@ -30,7 +31,7 @@ async def notify_order_paid(bot: Bot, order: Order, *, notify_customer: bool = T
             await bot.send_message(
                 admin_id,
                 "💸 <b>Новый оплаченный заказ</b>\n\n"
-                f"Товар: {order.title}\n"
+                f"Товар: {html.escape(order.title)}\n"
                 f"Пользователь: <code>{order.user_id}</code>\n"
                 f"Заказ: <code>{order.id}</code>",
             )
