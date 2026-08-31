@@ -12,6 +12,7 @@ from aiogram.types import BotCommand
 from app.config import get_settings
 from app.db import init_db
 from app.handlers import router
+from app.rewards_routes import router as rewards_router
 from app.web import create_web_app
 
 
@@ -22,6 +23,7 @@ async def main() -> None:
     bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
     dp.include_router(router)
+    dp.include_router(rewards_router)
 
     await init_db()
     await bot.set_my_commands(
@@ -30,6 +32,9 @@ async def main() -> None:
             BotCommand(command="paysupport", description="💬 Написать в поддержку"),
             BotCommand(command="id", description="🪪 Показать Telegram ID"),
             BotCommand(command="admin", description="⚙️ Управление магазином"),
+            BotCommand(command="bonus", description="💎 Бонусы"),
+            BotCommand(command="referral", description="👥 Рефералы"),
+            BotCommand(command="promo", description="🎁 Промокод"),
         ]
     )
 
