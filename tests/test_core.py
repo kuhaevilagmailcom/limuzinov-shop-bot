@@ -22,23 +22,27 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(settings.admins, {8464597898, 123})
 
     def test_storefront_escapes_bot_username(self):
-        product = SimpleNamespace(emoji="🎵", title="Создать песню", description="Описание", price_rub=None, price_stars=350)
+        product = SimpleNamespace(emoji="🛍", title="Новый товар", description="Описание", price_rub=990, price_stars=350)
         page = _storefront('safe" onclick="alert(1)', [product])
         self.assertNotIn('onclick="alert(1)', page)
         self.assertIn("LIMYZINOV", page)
         self.assertIn("350 ⭐", page)
-        self.assertIn("/static/brand/hero.png", page)
+        self.assertIn("/static/brand/hero-banner.png", page)
 
     def test_amount_match_is_exact(self):
         self.assertTrue(_same_amount("1000.00", Decimal("1000")))
         self.assertFalse(_same_amount("999.99", Decimal("1000")))
         self.assertFalse(_same_amount("not-a-number", Decimal("1000")))
 
-    def test_product_has_stars_and_admin_controls(self):
-        product = Product(id=7, key="song", title="Песня", description="ТЗ", price_rub=990, price_stars=350, emoji="🎵", kind="digital", requires_brief=True)
+    @patch("app.keyboards.get_settings")
+    def test_product_has_sbp_stars_and_admin_controls(self, mocked_settings):
+        mocked_settings.return_value.rollypay_enabled = True
+        product = Product(id=7, key="item", title="Товар", description="Описание", price_rub=990, price_stars=350, emoji="🛍", kind="digital", requires_brief=False)
         buy_data = [button.callback_data for row in product_keyboard(product).inline_keyboard for button in row if button.callback_data]
         admin_data = [button.callback_data for row in admin_product_keyboard(product).inline_keyboard for button in row if button.callback_data]
         self.assertIn("buy:stars:7", buy_data)
+        self.assertIn("buy:rolly:7", buy_data)
+        self.assertNotIn("buy:crypto:7", buy_data)
         self.assertIn("admin:edit:rub:7", admin_data)
         self.assertIn("admin:edit:stars:7", admin_data)
 

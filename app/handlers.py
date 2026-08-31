@@ -45,7 +45,7 @@ from app.payments.rollypay import RollyPayError, create_payment, get_payment
 router = Router()
 settings = get_settings()
 logger = logging.getLogger(__name__)
-BOT_COVER = Path(__file__).resolve().parent / "static" / "brand" / "bot-cover.png"
+BOT_COVER = Path(__file__).resolve().parent / "static" / "brand" / "hero-banner.png"
 
 
 class ProductOrderForm(StatesGroup):
@@ -105,7 +105,7 @@ async def start(message: Message, state: FSMContext) -> None:
 async def send_catalog(message: Message, *, edit: bool = False) -> None:
     async with SessionLocal() as session:
         products = await active_products(session)
-    text = "🛍 <b>Витрина LIMYZINOV</b>\n\nПесня теперь тоже здесь — как обычный товар. Выберите позицию:"
+    text = "🛍 <b>Витрина LIMYZINOV</b>\n\nВыберите товар:"
     if not products:
         text = "🛍 Каталог пока пуст. Скоро здесь появятся товары."
     if edit:
@@ -221,6 +221,9 @@ async def send_payment(
 @router.callback_query(F.data.startswith("buy:"))
 async def buy_product(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     _, provider, raw_id = callback.data.split(":", 2)
+    if provider not in {"rolly", "stars"}:
+        await callback.answer("Этот способ оплаты недоступен", show_alert=True)
+        return
     product_id = int(raw_id)
     async with SessionLocal() as session:
         product = await get_product(session, product_id)
@@ -228,9 +231,6 @@ async def buy_product(callback: CallbackQuery, state: FSMContext, bot: Bot) -> N
         await callback.answer("Товар не найден", show_alert=True)
         return
     if provider == "rolly" and not settings.rollypay_enabled:
-        await callback.answer("Этот способ оплаты пока недоступен", show_alert=True)
-        return
-    if provider == "crypto" and not settings.cryptopay_enabled:
         await callback.answer("Этот способ оплаты пока недоступен", show_alert=True)
         return
     if product.requires_brief:
@@ -413,7 +413,7 @@ async def admin_callbacks(callback: CallbackQuery, state: FSMContext) -> None:
         field, product_id = action[2], int(action[3])
         await state.set_state(AdminEditForm.value)
         await state.update_data(field=field, product_id=product_id)
-        prompts = {"rub": "Введите новую цену в рублях. 0 — отключить:", "stars": "Введите новую цену в Stars. 0 — отключить:", "text": "Введите <code>Название | Описание</code>:"}
+        prompts = {"rub": "Введите новую цену для СБП в рублях (больше 0):", "stars": "Введите новую цену в Stars (больше 0):", "text": "Введите <code>Название | Описание</code>:"}
         await callback.message.answer(prompts[field])
     await callback.answer()
 
@@ -433,7 +433,7 @@ async def admin_add_description(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(description=message.text.strip())
     await state.set_state(AdminAddForm.prices)
-    await message.answer("Введите цены в формате <code>рубли / Stars</code>.\nНапример: <code>990 / 350</code>. Ненужную цену укажите как 0.")
+    await message.answer("Введите обе цены в формате <code>СБП в рублях / Stars</code>.\nНапример: <code>990 / 350</code>.")
 
 
 @router.message(AdminAddForm.prices)
@@ -442,14 +442,14 @@ async def admin_add_prices(message: Message, state: FSMContext) -> None:
         return
     try:
         rub, stars = [int(v.strip()) for v in message.text.split("/", 1)]
-        if rub < 0 or stars < 0 or (rub == 0 and stars == 0):
+        if rub <= 0 or stars <= 0:
             raise ValueError
     except ValueError:
-        await message.answer("Нужен формат <code>990 / 350</code>. Хотя бы одна цена должна быть больше нуля.")
+        await message.answer("Нужен формат <code>990 / 350</code>. Обе цены должны быть больше нуля.")
         return
-    await state.update_data(price_rub=rub or None, price_stars=stars or None)
+    await state.update_data(price_rub=rub, price_stars=stars)
     await state.set_state(AdminAddForm.kind)
-    await message.answer("Введите тип: <code>physical</code>, <code>digital</code> или <code>song</code>.\nТип song попросит у покупателя техническое задание.")
+    await message.answer("Введите тип товара: <code>physical</code> или <code>digital</code>.")
 
 
 @router.message(AdminAddForm.kind)
@@ -457,8 +457,8 @@ async def admin_add_kind(message: Message, state: FSMContext) -> None:
     if not is_admin(message.from_user.id) or not message.text:
         return
     kind = message.text.strip().lower()
-    if kind not in {"physical", "digital", "song"}:
-        await message.answer("Введите physical, digital или song.")
+    if kind not in {"physical", "digital"}:
+        await message.answer("Введите physical или digital.")
         return
     data = await state.get_data()
     async with SessionLocal() as session:
@@ -468,9 +468,9 @@ async def admin_add_kind(message: Message, state: FSMContext) -> None:
             description=data["description"],
             price_rub=data["price_rub"],
             price_stars=data["price_stars"],
-            emoji="🎵" if kind == "song" else "🛍",
-            kind="digital" if kind in {"digital", "song"} else "physical",
-            requires_brief=kind == "song",
+            emoji="🛍",
+            kind=kind,
+            requires_brief=False,
         )
         session.add(product)
         await session.commit()
@@ -502,10 +502,10 @@ async def admin_edit_value(message: Message, state: FSMContext) -> None:
                 title, description = [v.strip() for v in message.text.split("|", 1)]
                 product.title, product.description = title[:255], description
                 value = 1
-            if value < 0 or not (product.price_rub or product.price_stars):
+            if value <= 0 or not product.price_rub or not product.price_stars:
                 raise ValueError
         except (ValueError, TypeError):
-            await message.answer("Неверное значение. У товара должна остаться хотя бы одна цена.")
+            await message.answer("Неверное значение. Для товара обязательны обе цены: СБП и Stars, обе больше нуля.")
             return
         await session.commit()
         await session.refresh(product)

@@ -44,9 +44,7 @@ def product_keyboard(product: Product) -> InlineKeyboardMarkup:
     if product.price_stars:
         rows.append([InlineKeyboardButton(text=f"⭐ Telegram Stars · {product.price_stars}", callback_data=f"buy:stars:{product.id}")])
     if product.price_rub and settings.rollypay_enabled:
-        rows.append([InlineKeyboardButton(text=f"⚡ СБП / карта · {product.price_rub} ₽", callback_data=f"buy:rolly:{product.id}")])
-    if product.price_rub and settings.cryptopay_enabled:
-        rows.append([InlineKeyboardButton(text=f"₿ Криптовалюта · {product.price_rub} ₽", callback_data=f"buy:crypto:{product.id}")])
+        rows.append([InlineKeyboardButton(text=f"⚡ СБП · {product.price_rub} ₽", callback_data=f"buy:rolly:{product.id}")])
     rows.append([InlineKeyboardButton(text="← Вернуться в каталог", callback_data="catalog")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

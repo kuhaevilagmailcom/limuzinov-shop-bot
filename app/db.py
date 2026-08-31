@@ -6,12 +6,12 @@ from enum import StrEnum
 from pathlib import Path
 from uuid import uuid4
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Integer, Numeric, String, Text, select, update
+from sqlalchemy import BigInteger, Boolean, DateTime, Integer, Numeric, String, Text, delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from app.config import get_settings
-from app.catalog import PRODUCT_SEEDS
+from app.catalog import PRODUCT_SEEDS, REMOVED_PRODUCT_KEYS
 
 
 class Base(DeclarativeBase):
@@ -101,11 +101,7 @@ async def init_db() -> None:
                         requires_brief=seed.requires_brief,
                     )
                 )
-        await session.execute(
-            update(Product)
-            .where(Product.description == "Фирменная футболка Limuzinov Shop.")
-            .values(description="Фирменная футболка Limyzinov Shop.")
-        )
+        await session.execute(delete(Product).where(Product.key.in_(REMOVED_PRODUCT_KEYS)))
         await session.commit()
 
 
@@ -220,7 +216,15 @@ async def recent_orders(session: AsyncSession, user_id: int, limit: int = 10) ->
 
 async def active_products(session: AsyncSession) -> list[Product]:
     result = await session.execute(
-        select(Product).where(Product.is_active.is_(True)).order_by(Product.id)
+        select(Product)
+        .where(
+            Product.is_active.is_(True),
+            Product.price_rub.is_not(None),
+            Product.price_rub > 0,
+            Product.price_stars.is_not(None),
+            Product.price_stars > 0,
+        )
+        .order_by(Product.id)
     )
     return list(result.scalars())
 
