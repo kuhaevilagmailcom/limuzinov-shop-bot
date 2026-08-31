@@ -12,10 +12,19 @@ def purchase_bonus(amount: Decimal | None) -> Decimal:
     return (Decimal(amount) * BONUS_PERCENT / Decimal("100")).quantize(Decimal("0.01"))
 
 
-async def reward_paid_order(session, order):
-    """Single entry point called after changed=True from mark_order_paid."""
+async def reward_paid_order(session, user, order):
+    """Called only after mark_order_paid returned changed=True."""
     bonus = purchase_bonus(order.amount_rub)
     if bonus <= 0:
         return Decimal("0")
-    user = await session.get(type(order).__mro__[0], order.user_id)
+    user.balance_rub += bonus
+    await session.commit()
     return bonus
+
+
+async def reward_referral(session, inviter):
+    if inviter is None:
+        return Decimal("0")
+    inviter.balance_rub += REFERRAL_BONUS
+    await session.commit()
+    return REFERRAL_BONUS
