@@ -7,6 +7,7 @@ import uvicorn
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.types import BotCommand
 
 from app.config import get_settings
 from app.db import init_db
@@ -23,8 +24,17 @@ async def main() -> None:
     dp.include_router(router)
 
     await init_db()
+    me = await bot.get_me()
+    await bot.set_my_commands(
+        [
+            BotCommand(command="start", description="Открыть магазин"),
+            BotCommand(command="paysupport", description="Помощь с оплатой"),
+            BotCommand(command="id", description="Узнать свой Telegram ID"),
+            BotCommand(command="admin", description="Админ-панель"),
+        ]
+    )
 
-    web_app = create_web_app(bot)
+    web_app = create_web_app(bot, me.username or "")
     server = uvicorn.Server(
         uvicorn.Config(
             web_app,
