@@ -1,13 +1,19 @@
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+)
 
 from app.config import get_settings
-from app.db import Product, SupportStatus, SupportTicket
+from app.db import Product, PromoCode, SupportStatus, SupportTicket
 
 
 def main_keyboard(admin: bool = False) -> ReplyKeyboardMarkup:
     rows = [
         [KeyboardButton(text="🛍 Каталог"), KeyboardButton(text="📦 Заказы")],
-        [KeyboardButton(text="👤 Профиль"), KeyboardButton(text="💬 Поддержка")],
+        [KeyboardButton(text="👤 Профиль"), KeyboardButton(text="🎁 Бонусы")],
+        [KeyboardButton(text="💬 Поддержка")],
     ]
     if admin:
         rows.append([KeyboardButton(text="⚙️ Админ-панель")])
@@ -66,6 +72,11 @@ def admin_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="📦 Товары", callback_data="admin:products")],
             [InlineKeyboardButton(text="✨ Создать товар", callback_data="admin:add")],
+            [
+                InlineKeyboardButton(text="📊 Аналитика", callback_data="admin:analytics"),
+                InlineKeyboardButton(text="🎟 Промокоды", callback_data="admin:promos"),
+            ],
+            [InlineKeyboardButton(text="🧾 Логи платежей", callback_data="admin:payments")],
             [InlineKeyboardButton(text="💬 Новые обращения", callback_data="admin:support:new")],
             [
                 InlineKeyboardButton(text="🗂 Все", callback_data="admin:support:all"),
@@ -73,6 +84,39 @@ def admin_keyboard() -> InlineKeyboardMarkup:
             ],
         ]
     )
+
+
+def bonus_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🎟 Ввести промокод", callback_data="bonus:promo")],
+            [
+                InlineKeyboardButton(text="👥 Моя ссылка", callback_data="bonus:referral"),
+                InlineKeyboardButton(text="📜 История", callback_data="bonus:history"),
+            ],
+        ]
+    )
+
+
+def bonus_cancel_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="✖️ Отменить", callback_data="bonus:cancel")]]
+    )
+
+
+def admin_promos_keyboard(promos: list[PromoCode]) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=f"{'✅' if promo.is_active else '⛔'} {promo.code} · {promo.bonus_amount} 🎁 · {promo.used_count}/{promo.max_uses}",
+                callback_data=f"admin:promo:toggle:{promo.id}",
+            )
+        ]
+        for promo in promos
+    ]
+    rows.append([InlineKeyboardButton(text="➕ Создать промокод", callback_data="admin:promo:add")])
+    rows.append([InlineKeyboardButton(text="‹ Админ-панель", callback_data="admin:home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def admin_products_keyboard(products: list[Product]) -> InlineKeyboardMarkup:

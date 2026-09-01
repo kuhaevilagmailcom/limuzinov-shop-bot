@@ -5,22 +5,33 @@ import time
 import unittest
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
+from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.config import OWNER_ADMIN_ID, Settings
-from app.payments.rollypay import verify_webhook as verify_rolly
 from app.db import (
     Base,
+    BonusAccount,
+    PaymentEvent,
     Product,
     SupportStatus,
     add_support_message,
+    apply_referral,
+    create_order,
+    create_promo_code,
     create_support_ticket,
     get_active_support_ticket,
+    get_shop_analytics,
     list_support_tickets,
+    mark_order_paid,
+    record_payment_event,
+    redeem_promo_code,
+    register_user,
     set_support_ticket_status,
-    support_ticket_messages,
     support_rate_limited,
+    support_ticket_messages,
 )
 from app.keyboards import (
     admin_product_keyboard,
@@ -29,6 +40,7 @@ from app.keyboards import (
     product_kind_keyboard,
     support_ticket_keyboard,
 )
+from app.payments.rollypay import verify_webhook as verify_rolly
 from app.ui import DIVIDER, screen
 from app.web import _same_amount, create_web_app
 
@@ -46,9 +58,9 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(paths, {"/health", "/rollypay/callback", "/webhooks/rollypay"})
 
     def test_amount_match_is_exact(self):
-        self.assertTrue(_same_amount("1000.00", Decimal("1000")))
-        self.assertFalse(_same_amount("999.99", Decimal("1000")))
-        self.assertFalse(_same_amount("not-a-number", Decimal("1000")))
+        self.assertTrue(_same_amount("1000.00", Decimal(1000)))
+        self.assertFalse(_same_amount("999.99", Decimal(1000)))
+        self.assertFalse(_same_amount("not-a-number", Decimal(1000)))
 
     @patch("app.keyboards.get_settings")
     def test_product_has_sbp_stars_and_admin_controls(self, mocked_settings):
@@ -139,6 +151,74 @@ class SupportDatabaseTests(unittest.IsolatedAsyncioTestCase):
             await set_support_ticket_status(session, ticket.id, SupportStatus.CLOSED)
             self.assertEqual(ticket.status, SupportStatus.CLOSED.value)
             self.assertIsNone(await get_active_support_ticket(session, 42))
+
+    async def test_bonus_promos_referrals_and_duplicate_protection(self):
+        async with self.sessions() as session:
+            await register_user(session, 100, "inviter", "Пригласивший")
+            await register_user(session, 200, "friend", "Друг")
+            self.assertTrue(await apply_referral(session, new_user_id=200, referrer_id=100))
+            self.assertFalse(await apply_referral(session, new_user_id=200, referrer_id=100))
+            self.assertEqual((await session.get(BonusAccount, 100)).balance, 100)
+            self.assertEqual((await session.get(BonusAccount, 200)).balance, 50)
+
+            promo = await create_promo_code(session, code="welcome", bonus_amount=75, max_uses=1)
+            self.assertIsNotNone(promo)
+            self.assertEqual(await redeem_promo_code(session, user_id=200, code="WELCOME"), ("ok", 75))
+            self.assertEqual(await redeem_promo_code(session, user_id=200, code="WELCOME"), ("already_used", 0))
+            self.assertEqual((await session.get(BonusAccount, 200)).balance, 125)
+
+    async def test_unique_orders_atomic_payment_and_event_log(self):
+        async with self.sessions() as session:
+            await register_user(session, 300, "buyer", "Покупатель")
+            first = await create_order(
+                session,
+                user_id=300,
+                kind="digital",
+                product_key="test",
+                title="Тест",
+                amount_rub=Decimal(500),
+            )
+            second = await create_order(
+                session,
+                user_id=300,
+                kind="digital",
+                product_key="test",
+                title="Тест",
+                amount_rub=Decimal(500),
+            )
+            UUID(first.id)
+            self.assertNotEqual(first.id, second.id)
+            _, changed_first = await mark_order_paid(session, first.id, payment_method="rollypay", provider_payment_id="pay-1")
+            _, changed_again = await mark_order_paid(session, first.id, payment_method="rollypay", provider_payment_id="pay-1")
+            _, changed_other_order = await mark_order_paid(session, second.id, payment_method="rollypay", provider_payment_id="pay-1")
+            self.assertTrue(changed_first)
+            self.assertFalse(changed_again)
+            self.assertFalse(changed_other_order)
+
+            await record_payment_event(
+                session,
+                event_key="event-1",
+                provider="rollypay",
+                order_id=first.id,
+                provider_payment_id="pay-1",
+                event_status="paid",
+                result="accepted",
+            )
+            await record_payment_event(
+                session,
+                event_key="event-1",
+                provider="rollypay",
+                order_id=first.id,
+                provider_payment_id="pay-1",
+                event_status="paid",
+                result="duplicate",
+            )
+            event = await session.scalar(select(PaymentEvent).where(PaymentEvent.event_key == "event-1"))
+            self.assertEqual(event.delivery_count, 2)
+            analytics = await get_shop_analytics(session)
+            self.assertEqual(analytics["users"], 1)
+            self.assertEqual(analytics["paid_buyers"], 1)
+            self.assertEqual(analytics["day"]["orders"], 1)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from decimal import Decimal, InvalidOperation
@@ -8,10 +9,15 @@ from aiogram import Bot
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 
-from app.db import Order, SessionLocal, mark_order_paid, update_order_status
+from app.db import (
+    Order,
+    SessionLocal,
+    mark_order_paid,
+    record_payment_event,
+    update_order_status,
+)
 from app.notifications import notify_order_paid
 from app.payments.rollypay import verify_webhook as verify_rolly_webhook
-
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +27,13 @@ def _same_amount(received: object, expected: Decimal | None) -> bool:
         return expected is not None and Decimal(str(received)) == expected
     except (InvalidOperation, ValueError):
         return False
+
+
+def _decimal_or_none(value: object) -> Decimal | None:
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
 
 
 def create_web_app(bot: Bot) -> FastAPI:
@@ -52,11 +65,33 @@ def create_web_app(bot: Bot) -> FastAPI:
         x_timestamp: str | None = Header(None),
     ) -> dict[str, bool]:
         raw = await request.body()
+        payload_hash = hashlib.sha256(raw).hexdigest()
+        event_key = hashlib.sha256(b"rollypay:" + raw).hexdigest()
         if not verify_rolly_webhook(raw, x_timestamp, x_signature):
+            async with SessionLocal() as session:
+                await record_payment_event(
+                    session,
+                    event_key=event_key,
+                    provider="rollypay",
+                    event_status="signature_invalid",
+                    result="rejected",
+                    reason="Invalid signature",
+                    payload_hash=payload_hash,
+                )
             raise HTTPException(403, "Invalid signature")
         try:
             event = json.loads(raw)
         except json.JSONDecodeError as exc:
+            async with SessionLocal() as session:
+                await record_payment_event(
+                    session,
+                    event_key=event_key,
+                    provider="rollypay",
+                    event_status="invalid_json",
+                    result="rejected",
+                    reason="Invalid JSON",
+                    payload_hash=payload_hash,
+                )
             raise HTTPException(400, "Invalid JSON") from exc
 
         order_id = str(event.get("order_id", ""))
@@ -73,7 +108,21 @@ def create_web_app(bot: Bot) -> FastAPI:
             )
             if not matches:
                 logger.warning("Rejected mismatched RollyPay callback for %s", order_id)
+                await record_payment_event(
+                    session,
+                    event_key=event_key,
+                    provider="rollypay",
+                    order_id=order_id or None,
+                    provider_payment_id=payment_id or None,
+                    event_status=status or "unknown",
+                    result="rejected",
+                    reason="Payment does not match order",
+                    amount=_decimal_or_none(event.get("amount")),
+                    currency=str(event.get("currency", event.get("payment_currency", ""))).upper() or None,
+                    payload_hash=payload_hash,
+                )
                 raise HTTPException(409, "Payment does not match order")
+            changed = False
             if status == "paid":
                 order, changed = await mark_order_paid(
                     session,
@@ -85,6 +134,18 @@ def create_web_app(bot: Bot) -> FastAPI:
                     await notify_order_paid(bot, order)
             elif status in {"processing", "canceled", "expired", "refunded", "chargeback"}:
                 await update_order_status(session, order_id, status)
+            await record_payment_event(
+                session,
+                event_key=event_key,
+                provider="rollypay",
+                order_id=order_id,
+                provider_payment_id=payment_id,
+                event_status=status or "unknown",
+                result="accepted" if changed or status != "paid" else "duplicate",
+                amount=_decimal_or_none(event.get("amount")),
+                currency="RUB",
+                payload_hash=payload_hash,
+            )
         return {"ok": True}
 
     return app

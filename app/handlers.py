@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import html
 import logging
+import re
 from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
@@ -9,17 +11,25 @@ from uuid import uuid4
 from aiogram import Bot, F, Router
 from aiogram.enums import ContentType
 from aiogram.exceptions import TelegramAPIError
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, FSInputFile, LabeledPrice, Message, PreCheckoutQuery
+from aiogram.types import (
+    CallbackQuery,
+    FSInputFile,
+    LabeledPrice,
+    Message,
+    PreCheckoutQuery,
+)
 from sqlalchemy import func, select
 
 from app.config import OWNER_ADMIN_ID, get_settings
 from app.db import (
+    BonusAccount,
     Order,
     OrderStatus,
     Product,
+    PromoCode,
     SessionLocal,
     SupportMessage,
     SupportStatus,
@@ -28,23 +38,36 @@ from app.db import (
     active_products,
     add_support_message,
     all_products,
+    apply_referral,
     create_order,
+    create_promo_code,
     create_support_ticket,
     get_active_support_ticket,
+    get_bonus_account,
     get_or_create_user,
     get_product,
+    get_shop_analytics,
+    list_promo_codes,
     list_support_tickets,
     mark_order_paid,
+    recent_bonus_transactions,
     recent_orders,
+    recent_payment_events,
+    record_payment_event,
+    redeem_promo_code,
+    register_user,
     set_support_ticket_status,
-    support_ticket_messages,
     support_rate_limited,
+    support_ticket_messages,
 )
 from app.keyboards import (
     admin_cancel_keyboard,
     admin_keyboard,
     admin_product_keyboard,
     admin_products_keyboard,
+    admin_promos_keyboard,
+    bonus_cancel_keyboard,
+    bonus_keyboard,
     catalog_keyboard,
     main_keyboard,
     payment_url_keyboard,
@@ -86,6 +109,14 @@ class SupportUserForm(StatesGroup):
 
 class SupportReplyForm(StatesGroup):
     content = State()
+
+
+class PromoUserForm(StatesGroup):
+    code = State()
+
+
+class AdminPromoForm(StatesGroup):
+    value = State()
 
 
 SUPPORT_CONTENT_TYPES = {
@@ -177,15 +208,39 @@ def menu_text(user: User) -> str:
     )
 
 
-@router.message(CommandStart())
-@router.message(F.text == "🏠 Главное меню")
-async def start(message: Message, state: FSMContext) -> None:
+async def send_home(message: Message, state: FSMContext, user: User) -> None:
     await state.clear()
-    user = await ensure_user(message)
     if BOT_COVER.exists():
         await message.answer_photo(FSInputFile(BOT_COVER), caption=menu_text(user), reply_markup=main_keyboard(is_admin(message.from_user.id)))
     else:
         await message.answer(menu_text(user), reply_markup=main_keyboard(is_admin(message.from_user.id)))
+
+
+@router.message(CommandStart())
+async def start(message: Message, state: FSMContext, command: CommandObject) -> None:
+    async with SessionLocal() as session:
+        user, created = await register_user(
+            session,
+            telegram_id=message.from_user.id,
+            username=message.from_user.username,
+            full_name=message.from_user.full_name,
+        )
+        if created and command.args and command.args.startswith("ref_"):
+            raw_referrer = command.args.removeprefix("ref_")
+            if raw_referrer.isdigit():
+                rewarded = await apply_referral(
+                    session,
+                    new_user_id=message.from_user.id,
+                    referrer_id=int(raw_referrer),
+                )
+                if rewarded:
+                    await message.answer(success("Подарок за приглашение", "На ваш бонусный баланс начислено <b>50 бонусов</b> 🎁"))
+    await send_home(message, state, user)
+
+
+@router.message(F.text == "🏠 Главное меню")
+async def home_menu(message: Message, state: FSMContext) -> None:
+    await send_home(message, state, await ensure_user(message))
 
 
 async def send_catalog(message: Message, *, edit: bool = False) -> None:
@@ -279,6 +334,16 @@ async def send_payment(
                 return
             order.payment_method = "telegram_stars"
             await session.commit()
+            await record_payment_event(
+                session,
+                event_key=hashlib.sha256(f"created:stars:{order.id}".encode()).hexdigest(),
+                provider="telegram_stars",
+                order_id=order.id,
+                event_status="created",
+                result="accepted",
+                amount=Decimal(product.price_stars),
+                currency="XTR",
+            )
             await bot.send_invoice(
                 chat_id=message.chat.id,
                 title=product.title[:32],
@@ -299,8 +364,19 @@ async def send_payment(
             order.provider_payment_id = str(payment.get("payment_id", ""))
             pay_url = payment["pay_url"]
             await session.commit()
-        except (RollyPayError, KeyError) as exc:
-            logger.exception("Payment creation failed for order %s: %s", order.id, exc)
+            await record_payment_event(
+                session,
+                event_key=hashlib.sha256(f"created:rollypay:{order.id}".encode()).hexdigest(),
+                provider="rollypay",
+                order_id=order.id,
+                provider_payment_id=order.provider_payment_id,
+                event_status="created",
+                result="accepted",
+                amount=Decimal(product.price_rub),
+                currency="RUB",
+            )
+        except (RollyPayError, KeyError):
+            logger.exception("Payment creation failed for order %s", order.id)
             await message.answer(warning("Не удалось создать платёж", "Попробуйте ещё раз через минуту."))
             return
 
@@ -404,12 +480,37 @@ async def stars_success(message: Message, bot: Bot) -> None:
     if payment.currency != "XTR" or not payment.invoice_payload.startswith("order:"):
         return
     order_id = payment.invoice_payload.split(":", 1)[1]
+    charge_id = payment.telegram_payment_charge_id
+    event_key = hashlib.sha256(f"stars:{charge_id}".encode()).hexdigest()
     async with SessionLocal() as session:
         expected = await session.get(Order, order_id)
         if not expected or expected.user_id != message.from_user.id or expected.amount_stars != payment.total_amount or expected.payment_method != "telegram_stars":
             logger.error("Rejected mismatched Stars payment for order %s", order_id)
+            await record_payment_event(
+                session,
+                event_key=event_key,
+                provider="telegram_stars",
+                order_id=order_id,
+                provider_payment_id=charge_id,
+                event_status="paid",
+                result="rejected",
+                reason="Payment does not match order",
+                amount=Decimal(payment.total_amount),
+                currency="XTR",
+            )
             return
-        order, changed = await mark_order_paid(session, order_id, payment_method="telegram_stars", provider_payment_id=payment.telegram_payment_charge_id)
+        order, changed = await mark_order_paid(session, order_id, payment_method="telegram_stars", provider_payment_id=charge_id)
+        await record_payment_event(
+            session,
+            event_key=event_key,
+            provider="telegram_stars",
+            order_id=order_id,
+            provider_payment_id=charge_id,
+            event_status="paid",
+            result="accepted" if changed else "duplicate",
+            amount=Decimal(payment.total_amount),
+            currency="XTR",
+        )
     if order:
         await message.answer(
             success(
@@ -424,6 +525,8 @@ async def stars_success(message: Message, bot: Bot) -> None:
 @router.message(F.text.in_({"👤 Профиль", "💰 Баланс"}))
 async def profile(message: Message) -> None:
     user = await ensure_user(message)
+    async with SessionLocal() as session:
+        bonus = await get_bonus_account(session, user.telegram_id)
     username = f"@{html.escape(user.username)}" if user.username else "не указан"
     await message.answer(
         screen(
@@ -433,10 +536,94 @@ async def profile(message: Message) -> None:
             f"🔗 {username}\n"
             f"🆔 <code>{user.telegram_id}</code>\n\n"
             f"🛍 Покупок: <b>{user.purchases_count}</b>\n"
+            f"🎁 Бонусов: <b>{bonus.balance}</b>\n"
             f"📅 С нами с: <b>{user.created_at:%d.%m.%Y}</b>",
             "История покупок доступна в разделе «Заказы»",
         )
     )
+
+
+async def send_bonus_screen(message: Message, user_id: int) -> None:
+    async with SessionLocal() as session:
+        account = await get_bonus_account(session, user_id)
+        invited = (
+            await session.execute(select(func.count()).select_from(BonusAccount).where(BonusAccount.referred_by == user_id))
+        ).scalar_one()
+    await message.answer(
+        screen(
+            "🎁",
+            "Бонусный клуб",
+            f"💰 Баланс: <b>{account.balance} бонусов</b>\n"
+            f"👥 Приглашено друзей: <b>{invited}</b>\n\n"
+            "За каждого нового друга вы получите <b>100 бонусов</b>, "
+            "а друг — <b>50 бонусов</b>.",
+            "Промокод можно активировать только один раз",
+        ),
+        reply_markup=bonus_keyboard(),
+    )
+
+
+@router.message(F.text == "🎁 Бонусы")
+async def bonuses(message: Message) -> None:
+    await ensure_user(message)
+    await send_bonus_screen(message, message.from_user.id)
+
+
+@router.callback_query(F.data.startswith("bonus:"))
+async def bonus_callbacks(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    action = callback.data.split(":", 1)[1]
+    if action == "promo":
+        await state.set_state(PromoUserForm.code)
+        await callback.message.answer(
+            screen("🎟", "Активация промокода", "Отправьте промокод одним сообщением."),
+            reply_markup=bonus_cancel_keyboard(),
+        )
+    elif action == "referral":
+        me = await bot.get_me()
+        link = f"https://t.me/{me.username}?start=ref_{callback.from_user.id}"
+        await callback.message.answer(
+            screen(
+                "👥",
+                "Пригласить друга",
+                f"Ваша персональная ссылка:\n<code>{html.escape(link)}</code>\n\n"
+                "Вы получите <b>100 бонусов</b>, друг — <b>50 бонусов</b>.",
+                "Награда начисляется за нового пользователя",
+            )
+        )
+    elif action == "history":
+        async with SessionLocal() as session:
+            items = await recent_bonus_transactions(session, callback.from_user.id)
+        labels = {"promo": "🎟 Промокод", "referral_join": "🎁 Вход по приглашению", "referral_invite": "👥 Приглашённый друг"}
+        body = "\n".join(
+            f"{labels.get(item.reason, '🎁 Бонусы')}: <b>{item.amount:+d}</b> · {item.created_at:%d.%m.%Y}"
+            for item in items
+        ) or "Операций пока нет."
+        await callback.message.answer(screen("📜", "История бонусов", body))
+    elif action == "cancel":
+        await state.clear()
+        await send_bonus_screen(callback.message, callback.from_user.id)
+    await callback.answer()
+
+
+@router.message(PromoUserForm.code)
+async def redeem_promo(message: Message, state: FSMContext) -> None:
+    if not message.text:
+        await message.answer(warning("Нужен текстовый код", "Введите промокод буквами и цифрами."), reply_markup=bonus_cancel_keyboard())
+        return
+    async with SessionLocal() as session:
+        status, amount = await redeem_promo_code(session, user_id=message.from_user.id, code=message.text)
+    messages = {
+        "not_found": warning("Промокод не найден", "Проверьте написание и попробуйте ещё раз."),
+        "inactive": warning("Промокод выключен", "Этот промокод больше не действует."),
+        "already_used": warning("Уже использован", "Один промокод можно активировать только один раз."),
+        "limit_reached": warning("Активации закончились", "Лимит этого промокода исчерпан."),
+    }
+    if status != "ok":
+        await message.answer(messages[status], reply_markup=bonus_cancel_keyboard())
+        return
+    await state.clear()
+    await message.answer(success("Промокод активирован", f"Начислено <b>{amount} бонусов</b> 🎁"))
+    await send_bonus_screen(message, message.from_user.id)
 
 
 @router.message(F.text.in_({"📦 Заказы", "📦 Мои покупки"}))
@@ -575,6 +762,53 @@ async def admin_home(target: Message) -> None:
     await target.answer(text, reply_markup=admin_keyboard())
 
 
+def sales_line(label: str, stats: dict[str, object]) -> str:
+    return (
+        f"{label}: <b>{stats['orders']}</b> заказов · "
+        f"<b>{money(stats['rub'])} ₽</b> · <b>{stats['stars']} ⭐</b>"
+    )
+
+
+async def send_admin_analytics(target: Message) -> None:
+    async with SessionLocal() as session:
+        data = await get_shop_analytics(session)
+    popular = data["popular"]
+    popular_text = "\n".join(
+        f"{index}. {html.escape(title)} — <b>{sales}</b>"
+        for index, (title, sales) in enumerate(popular, 1)
+    ) or "Продаж пока нет."
+    await target.answer(
+        screen(
+            "📊",
+            "Аналитика магазина",
+            f"👥 Пользователей: <b>{data['users']}</b>\n"
+            f"🛍 Покупателей: <b>{data['paid_buyers']}</b>\n"
+            f"🎯 Конверсия в покупку: <b>{data['conversion']:.1f}%</b>\n\n"
+            f"{sales_line('За 24 часа', data['day'])}\n"
+            f"{sales_line('За 7 дней', data['week'])}\n"
+            f"{sales_line('За 30 дней', data['month'])}\n\n"
+            f"<b>🔥 Популярные товары</b>\n{popular_text}",
+            "Рубли и Telegram Stars считаются отдельно",
+        )
+    )
+
+
+async def send_payment_logs(target: Message) -> None:
+    async with SessionLocal() as session:
+        events = await recent_payment_events(session)
+    result_icons = {"accepted": "✅", "duplicate": "🔁", "rejected": "⛔"}
+    rows = []
+    for event in events:
+        order = event.order_id[:8] if event.order_id else "—"
+        rows.append(
+            f"{result_icons.get(event.result, '•')} <b>{html.escape(event.provider)}</b> · {html.escape(event.event_status)}\n"
+            f"Заказ <code>{order}</code> · доставок: <b>{event.delivery_count}</b> · {event.last_seen_at:%d.%m %H:%M}"
+        )
+    await target.answer(
+        screen("🧾", "Журнал платежей", "\n\n".join(rows) if rows else "Событий пока нет.", "Последние 20 событий")
+    )
+
+
 @router.message(Command("id"))
 async def show_id(message: Message) -> None:
     await message.answer(screen("🪪", "Ваш Telegram ID", f"<code>{message.from_user.id}</code>"))
@@ -644,6 +878,44 @@ async def admin_callbacks(callback: CallbackQuery, state: FSMContext) -> None:
             screen("📦", "Управление товарами", body),
             reply_markup=admin_products_keyboard(products),
         )
+    elif action[1] == "analytics":
+        await send_admin_analytics(callback.message)
+    elif action[1] == "payments":
+        await send_payment_logs(callback.message)
+    elif action[1] == "promos":
+        async with SessionLocal() as session:
+            promos = await list_promo_codes(session)
+        await callback.message.answer(
+            screen("🎟", "Промокоды", "Нажмите на промокод, чтобы включить или выключить его." if promos else "Промокодов пока нет."),
+            reply_markup=admin_promos_keyboard(promos),
+        )
+    elif action[1] == "promo":
+        operation = action[2] if len(action) > 2 else ""
+        if operation == "add":
+            await state.set_state(AdminPromoForm.value)
+            await callback.message.answer(
+                screen(
+                    "➕",
+                    "Новый промокод",
+                    "Отправьте данные через слеш:\n\n<code>WELCOME / 100 / 50</code>\n"
+                    "где 100 — бонусы, 50 — число активаций.",
+                ),
+                reply_markup=admin_cancel_keyboard(),
+            )
+        elif operation == "toggle" and len(action) > 3:
+            async with SessionLocal() as session:
+                promo = await session.get(PromoCode, int(action[3]))
+                if promo:
+                    promo.is_active = not promo.is_active
+                    await session.commit()
+                promos = await list_promo_codes(session)
+            if promo is None:
+                await callback.answer("Промокод не найден", show_alert=True)
+                return
+            await callback.message.answer(
+                success("Статус изменён", f"Промокод <code>{promo.code}</code> {'включён' if promo.is_active else 'выключен'}."),
+                reply_markup=admin_promos_keyboard(promos),
+            )
     elif action[1] == "support":
         if not is_support_admin(callback.from_user.id):
             await callback.answer("Доступ только владельцу", show_alert=True)
@@ -849,6 +1121,37 @@ async def admin_add_title(message: Message, state: FSMContext) -> None:
     await message.answer(
         screen("✨", "Новый товар · 2/4", "Расскажите коротко, что получает покупатель."),
         reply_markup=admin_cancel_keyboard(),
+    )
+
+
+@router.message(AdminPromoForm.value)
+async def admin_add_promo(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id) or not message.text:
+        return
+    try:
+        code, raw_bonus, raw_limit = [part.strip() for part in message.text.split("/", 2)]
+        bonus_amount, max_uses = int(raw_bonus), int(raw_limit)
+        if not re.fullmatch(r"[A-Za-z0-9_-]{3,32}", code) or bonus_amount <= 0 or max_uses <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer(
+            warning("Проверьте формат", "Пример: <code>WELCOME / 100 / 50</code>. Код от 3 символов, числа больше нуля."),
+            reply_markup=admin_cancel_keyboard(),
+        )
+        return
+    async with SessionLocal() as session:
+        promo = await create_promo_code(session, code=code, bonus_amount=bonus_amount, max_uses=max_uses)
+        promos = await list_promo_codes(session)
+    if promo is None:
+        await message.answer(warning("Код уже существует", "Придумайте другой промокод."), reply_markup=admin_cancel_keyboard())
+        return
+    await state.clear()
+    await message.answer(
+        success(
+            "Промокод создан",
+            f"Код: <code>{promo.code}</code>\n🎁 Бонусов: <b>{promo.bonus_amount}</b>\n👥 Активаций: <b>{promo.max_uses}</b>",
+        ),
+        reply_markup=admin_promos_keyboard(promos),
     )
 
 
