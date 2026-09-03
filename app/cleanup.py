@@ -1,36 +1,31 @@
 from __future__ import annotations
 
-import logging
 from collections import defaultdict
 
-from aiogram import BaseMiddleware
-from aiogram.types import Message
-
-logger = logging.getLogger(__name__)
+from aiogram import Bot
 
 
-class DeletePreviousMessagesMiddleware(BaseMiddleware):
-    """Удаляет предыдущее сообщение бота в чате перед отправкой нового."""
+class CleanBot(Bot):
+    """Удаляет прошлое сообщение бота перед отправкой нового."""
 
-    def __init__(self):
-        self.last_messages = defaultdict(list)
+    _history = defaultdict(list)
 
-    async def __call__(self, handler, event, data):
-        result = await handler(event, data)
+    async def _cleanup(self, chat_id: int):
+        for message_id in self._history[chat_id]:
+            try:
+                await super().delete_message(chat_id, message_id)
+            except Exception:
+                pass
+        self._history[chat_id].clear()
 
-        if isinstance(event, Message):
-            sent = data.get("bot")
-            if sent and event.chat:
-                try:
-                    old_ids = self.last_messages[event.chat.id]
-                    for message_id in old_ids:
-                        try:
-                            await sent.delete_message(event.chat.id, message_id)
-                        except Exception:
-                            pass
-                    if event.message_id:
-                        self.last_messages[event.chat.id] = [event.message_id]
-                except Exception:
-                    logger.exception("Message cleanup failed")
+    async def send_message(self, chat_id, *args, **kwargs):
+        await self._cleanup(chat_id)
+        message = await super().send_message(chat_id, *args, **kwargs)
+        self._history[chat_id].append(message.message_id)
+        return message
 
-        return result
+    async def send_photo(self, chat_id, *args, **kwargs):
+        await self._cleanup(chat_id)
+        message = await super().send_photo(chat_id, *args, **kwargs)
+        self._history[chat_id].append(message.message_id)
+        return message
