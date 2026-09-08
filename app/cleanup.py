@@ -8,7 +8,7 @@ from typing import Any
 
 from aiogram import BaseMiddleware, Bot
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
-from aiogram.types import Message, TelegramObject
+from aiogram.types import InlineKeyboardMarkup, Message, TelegramObject
 
 
 class CleanBot(Bot):
@@ -67,6 +67,23 @@ class CleanBot(Bot):
                 value, count = pattern.subn(r"\1", kwargs[key])
                 kwargs[key] = value
                 changed = changed or bool(count)
+        markup = kwargs.get("reply_markup")
+        if isinstance(markup, InlineKeyboardMarkup):
+            rows = []
+            markup_changed = False
+            for row in markup.inline_keyboard:
+                clean_row = []
+                for button in row:
+                    if button.icon_custom_emoji_id:
+                        button = button.model_copy(
+                            update={"icon_custom_emoji_id": None}
+                        )
+                        markup_changed = True
+                    clean_row.append(button)
+                rows.append(clean_row)
+            if markup_changed:
+                kwargs["reply_markup"] = InlineKeyboardMarkup(inline_keyboard=rows)
+                changed = True
         return tuple(args), kwargs, changed
 
     async def send_message(self, chat_id, *args, **kwargs):
@@ -79,7 +96,13 @@ class CleanBot(Bot):
         return await self._replace(chat_id, super().send_invoice, *args, **kwargs)
 
     async def edit_message_text(self, *args, **kwargs):
-        return await super().edit_message_text(*args, **kwargs)
+        try:
+            return await super().edit_message_text(*args, **kwargs)
+        except TelegramBadRequest:
+            clean_args, clean_kwargs, changed = self._strip_premium_emoji(args, kwargs)
+            if not changed:
+                raise
+            return await super().edit_message_text(*clean_args, **clean_kwargs)
 
 
 class DeleteIncomingMessageMiddleware(BaseMiddleware):

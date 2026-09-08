@@ -1,10 +1,26 @@
 DIVIDER = "—"
-PREMIUM_EMOJI_ID = "5368324170671202286"
+PREMIUM_EMOJIS = {
+    "default": ("💎", "5309958691854754293"),
+    "success": ("🔥", "5312241539987020022"),
+    "warning": ("❗️", "5379748062124056162"),
+    "money": ("💰", "5350452584119279096"),
+    "orders": ("📰", "5434144690511290129"),
+}
 
 
 def premium_emoji(fallback: str) -> str:
     """Animated Telegram emoji with a normal Unicode fallback."""
-    return f'<tg-emoji emoji-id="{PREMIUM_EMOJI_ID}">{fallback}</tg-emoji>'
+    key = "default"
+    if fallback in {"✅", "🔥"}:
+        key = "success"
+    elif fallback in {"⚠️", "❗", "❗️"}:
+        key = "warning"
+    elif fallback in {"💸", "💳", "💰"}:
+        key = "money"
+    elif fallback in {"📦", "🧾"}:
+        key = "orders"
+    emoji, emoji_id = PREMIUM_EMOJIS[key]
+    return f'<tg-emoji emoji-id="{emoji_id}">{emoji}</tg-emoji>'
 
 
 def screen(icon: str, title: str, body: str, footer: str | None = None) -> str:

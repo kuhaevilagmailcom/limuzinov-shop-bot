@@ -291,6 +291,7 @@ async def home_menu(message: Message, state: FSMContext) -> None:
 
 @router.callback_query(F.data == "home")
 async def home_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
     async with SessionLocal() as session:
         user = await get_or_create_user(
             session,
@@ -299,7 +300,6 @@ async def home_callback(callback: CallbackQuery, state: FSMContext) -> None:
             callback.from_user.full_name,
         )
     await send_home(callback.message, state, user, callback.from_user.id)
-    await callback.answer()
 
 
 async def send_catalog(message: Message, *, edit: bool = False) -> None:

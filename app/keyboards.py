@@ -160,6 +160,7 @@ def bonus_keyboard(
                 InlineKeyboardButton(
                     text="Открыть секретное предложение",
                     callback_data="bonus:secret",
+                    icon_custom_emoji_id="5309958691854754293",
                     style="primary",
                 )
             ],
@@ -252,6 +253,7 @@ def checkout_keyboard(
                 InlineKeyboardButton(
                     text=f"Оплатить по СБП · {amount_rub} ₽",
                     callback_data="checkout:rolly",
+                    icon_custom_emoji_id="5350452584119279096",
                     style="success",
                 )
             ]
@@ -262,6 +264,7 @@ def checkout_keyboard(
                 InlineKeyboardButton(
                     text=f"Оплатить звёздами · {amount_stars} ⭐",
                     callback_data="checkout:stars",
+                    icon_custom_emoji_id="5309958691854754293",
                     style="success",
                 )
             ]
@@ -286,7 +289,14 @@ def bonus_cancel_keyboard() -> InlineKeyboardMarkup:
 def home_inline_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="← Главное меню", callback_data="home")]
+            [
+                InlineKeyboardButton(
+                    text="Главное меню",
+                    callback_data="home",
+                    icon_custom_emoji_id="5309958691854754293",
+                    style="primary",
+                )
+            ]
         ]
     )
 
