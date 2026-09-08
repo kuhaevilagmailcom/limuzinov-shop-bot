@@ -160,7 +160,14 @@ class CoreTests(unittest.TestCase):
         self.assertIn("Управление магазином", admin_buttons)
         self.assertIn("Мои заказы", regular_buttons)
         self.assertIn("Поддержка", regular_buttons)
-        self.assertIn("← Назад", regular_buttons)
+        self.assertNotIn("← Назад", regular_buttons)
+        self.assertTrue(
+            all(
+                button.icon_custom_emoji_id
+                for row in main_keyboard(False).keyboard
+                for button in row
+            )
+        )
         kind_actions = [
             button.callback_data
             for row in product_kind_keyboard().inline_keyboard

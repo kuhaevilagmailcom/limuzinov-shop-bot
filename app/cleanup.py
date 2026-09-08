@@ -8,7 +8,12 @@ from typing import Any
 
 from aiogram import BaseMiddleware, Bot
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
-from aiogram.types import InlineKeyboardMarkup, Message, TelegramObject
+from aiogram.types import (
+    InlineKeyboardMarkup,
+    Message,
+    ReplyKeyboardMarkup,
+    TelegramObject,
+)
 
 
 class CleanBot(Bot):
@@ -83,6 +88,22 @@ class CleanBot(Bot):
                 rows.append(clean_row)
             if markup_changed:
                 kwargs["reply_markup"] = InlineKeyboardMarkup(inline_keyboard=rows)
+                changed = True
+        elif isinstance(markup, ReplyKeyboardMarkup):
+            rows = []
+            markup_changed = False
+            for row in markup.keyboard:
+                clean_row = []
+                for button in row:
+                    if button.icon_custom_emoji_id:
+                        button = button.model_copy(
+                            update={"icon_custom_emoji_id": None}
+                        )
+                        markup_changed = True
+                    clean_row.append(button)
+                rows.append(clean_row)
+            if markup_changed:
+                kwargs["reply_markup"] = markup.model_copy(update={"keyboard": rows})
                 changed = True
         return tuple(args), kwargs, changed
 

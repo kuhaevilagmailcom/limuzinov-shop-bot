@@ -231,13 +231,13 @@ async def ensure_user(message: Message) -> User:
 
 
 def menu_text(user: User) -> str:
-    return screen(
-        "◆",
-        "LIMYZINOV SHOP",
-        f"<b>{html.escape(user.full_name)}</b>, добро пожаловать.\n\n"
-        "Здесь собраны актуальные предложения магазина. "
-        "Выберите позицию, изучите детали и оплатите удобным способом.",
-        "СБП и Telegram Stars · поддержка внутри бота",
+    return (
+        '<tg-emoji emoji-id="5427168083074628963">💎</tg-emoji>\n\n'
+        f"{html.escape(user.full_name)}, добро пожаловать в <b>LIMYZINOV SHOP</b>\n\n"
+        "💳 Удобная оплата: <b>СБП / Telegram Stars</b>\n"
+        "🚚 Доставка по городу: <b>от 50 ₽</b>\n"
+        "📍 Самовывоз: <b>Гостинка</b>\n\n"
+        "<b>Меню есть ниже</b> 👇"
     )
 
 

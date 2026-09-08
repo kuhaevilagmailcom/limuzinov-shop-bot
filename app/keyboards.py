@@ -8,16 +8,68 @@ from aiogram.types import (
 from app.config import get_settings
 from app.db import Product, PromoCode, SupportStatus, SupportTicket
 
+NEWS_EMOJI = {
+    "catalog": "5229064374403998351",  # 🛍
+    "orders": "5222444124698853913",  # 🔖
+    "profile": "5461117441612462242",  # 🙂
+    "bonus": "5427168083074628963",  # 💎
+    "support": "5443038326535759644",  # 💬
+    "admin": "5341715473882955310",  # ⚙️
+    "home": "5416041192905265756",  # 🏠
+    "back": "5416117059207572332",  # ➡️
+    "pay": "5409048419211682843",  # 💵
+    "stars": "5438496463044752972",  # ⭐️
+    "delivery": "5391032818111363540",  # 📍
+    "gift": "5461151367559141950",  # 🎉
+    "check": "5206607081334906820",  # ✔️
+    "refresh": "5375338737028841420",  # 🔄
+    "promo": "5341498088408234504",  # 💯
+    "invite": "5271604874419647061",  # 🔗
+    "history": "5231200819986047254",  # 📊
+    "add": "5397916757333654639",  # ➕
+    "edit": "5395444784611480792",  # ✏️
+    "view": "5210956306952758910",  # 👀
+    "delete": "5445267414562389170",  # 🗑
+}
+
+
+def home_button(text: str = "Главное меню") -> InlineKeyboardButton:
+    return InlineKeyboardButton(
+        text=text,
+        callback_data="home",
+        icon_custom_emoji_id=NEWS_EMOJI["home"],
+    )
+
 
 def main_keyboard(admin: bool = False) -> ReplyKeyboardMarkup:
     rows = [
-        [KeyboardButton(text="Каталог"), KeyboardButton(text="Мои заказы")],
-        [KeyboardButton(text="Профиль"), KeyboardButton(text="Бонусный клуб")],
-        [KeyboardButton(text="Поддержка")],
+        [
+            KeyboardButton(
+                text="Каталог",
+                icon_custom_emoji_id=NEWS_EMOJI["catalog"],
+                style="primary",
+            ),
+            KeyboardButton(
+                text="Мои заказы", icon_custom_emoji_id=NEWS_EMOJI["orders"]
+            ),
+        ],
+        [
+            KeyboardButton(text="Профиль", icon_custom_emoji_id=NEWS_EMOJI["profile"]),
+            KeyboardButton(
+                text="Бонусный клуб", icon_custom_emoji_id=NEWS_EMOJI["bonus"]
+            ),
+        ],
+        [KeyboardButton(text="Поддержка", icon_custom_emoji_id=NEWS_EMOJI["support"])],
     ]
     if admin:
-        rows.append([KeyboardButton(text="Управление магазином")])
-    rows.append([KeyboardButton(text="← Назад")])
+        rows.append(
+            [
+                KeyboardButton(
+                    text="Управление магазином",
+                    icon_custom_emoji_id=NEWS_EMOJI["admin"],
+                )
+            ]
+        )
     return ReplyKeyboardMarkup(
         keyboard=rows,
         resize_keyboard=True,
@@ -40,11 +92,12 @@ def catalog_keyboard(products: list[Product]) -> InlineKeyboardMarkup:
             InlineKeyboardButton(
                 text=f"{product.title} · {product_price(product)}",
                 callback_data=f"product:{product.id}",
+                icon_custom_emoji_id=NEWS_EMOJI["catalog"],
             )
         ]
         for product in products
     ]
-    rows.append([InlineKeyboardButton(text="Главное меню", callback_data="home")])
+    rows.append([home_button()])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -57,6 +110,7 @@ def product_keyboard(product: Product) -> InlineKeyboardMarkup:
                     InlineKeyboardButton(
                         text="Доставка · +50 ₽ / +25 ⭐",
                         callback_data=f"fulfill:delivery:{product.id}:0",
+                        icon_custom_emoji_id=NEWS_EMOJI["delivery"],
                         style="primary",
                     )
                 ],
@@ -64,6 +118,7 @@ def product_keyboard(product: Product) -> InlineKeyboardMarkup:
                     InlineKeyboardButton(
                         text="Самовывоз · Гостиный Двор",
                         callback_data=f"fulfill:pickup:{product.id}:0",
+                        icon_custom_emoji_id=NEWS_EMOJI["home"],
                     )
                 ],
             ]
@@ -76,6 +131,8 @@ def product_keyboard(product: Product) -> InlineKeyboardMarkup:
                     InlineKeyboardButton(
                         text=f"Оплатить по СБП · {product.price_rub} ₽",
                         callback_data=f"buy:rolly:{product.id}",
+                        icon_custom_emoji_id=NEWS_EMOJI["pay"],
+                        style="success",
                     )
                 ]
             )
@@ -85,6 +142,8 @@ def product_keyboard(product: Product) -> InlineKeyboardMarkup:
                     InlineKeyboardButton(
                         text=f"Оплатить звёздами · {product.price_stars} ⭐",
                         callback_data=f"buy:stars:{product.id}",
+                        icon_custom_emoji_id=NEWS_EMOJI["stars"],
+                        style="success",
                     )
                 ]
             )
@@ -95,14 +154,23 @@ def product_keyboard(product: Product) -> InlineKeyboardMarkup:
 def payment_url_keyboard(url: str, order_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Перейти к оплате", url=url)],
             [
                 InlineKeyboardButton(
-                    text="Проверить платёж", callback_data=f"status:{order_id}"
+                    text="Перейти к оплате",
+                    url=url,
+                    icon_custom_emoji_id=NEWS_EMOJI["pay"],
+                    style="success",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Проверить платёж",
+                    callback_data=f"status:{order_id}",
+                    icon_custom_emoji_id=NEWS_EMOJI["refresh"],
                 )
             ],
             [InlineKeyboardButton(text="← В каталог", callback_data="catalog")],
-            [InlineKeyboardButton(text="Главное меню", callback_data="home")],
+            [home_button()],
         ]
     )
 
@@ -110,8 +178,15 @@ def payment_url_keyboard(url: str, order_id: str) -> InlineKeyboardMarkup:
 def stars_invoice_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Оплатить звёздами", pay=True)],
-            [InlineKeyboardButton(text="Главное меню", callback_data="home")],
+            [
+                InlineKeyboardButton(
+                    text="Оплатить звёздами",
+                    pay=True,
+                    icon_custom_emoji_id=NEWS_EMOJI["stars"],
+                    style="success",
+                )
+            ],
+            [home_button()],
         ]
     )
 
@@ -119,29 +194,61 @@ def stars_invoice_keyboard() -> InlineKeyboardMarkup:
 def admin_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Товары", callback_data="admin:products")],
-            [InlineKeyboardButton(text="Создать товар", callback_data="admin:add")],
-            [
-                InlineKeyboardButton(text="Аналитика", callback_data="admin:analytics"),
-                InlineKeyboardButton(text="Промокоды", callback_data="admin:promos"),
-            ],
             [
                 InlineKeyboardButton(
-                    text="Журнал платежей", callback_data="admin:payments"
+                    text="Товары",
+                    callback_data="admin:products",
+                    icon_custom_emoji_id=NEWS_EMOJI["catalog"],
+                    style="primary",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="Новые обращения", callback_data="admin:support:new"
+                    text="Создать товар",
+                    callback_data="admin:add",
+                    icon_custom_emoji_id=NEWS_EMOJI["add"],
+                    style="success",
                 )
             ],
             [
-                InlineKeyboardButton(text="Все", callback_data="admin:support:all"),
                 InlineKeyboardButton(
-                    text="Закрытые", callback_data="admin:support:closed"
+                    text="Аналитика",
+                    callback_data="admin:analytics",
+                    icon_custom_emoji_id=NEWS_EMOJI["history"],
+                ),
+                InlineKeyboardButton(
+                    text="Промокоды",
+                    callback_data="admin:promos",
+                    icon_custom_emoji_id=NEWS_EMOJI["promo"],
                 ),
             ],
-            [InlineKeyboardButton(text="Главное меню", callback_data="home")],
+            [
+                InlineKeyboardButton(
+                    text="Журнал платежей",
+                    callback_data="admin:payments",
+                    icon_custom_emoji_id=NEWS_EMOJI["pay"],
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Новые обращения",
+                    callback_data="admin:support:new",
+                    icon_custom_emoji_id=NEWS_EMOJI["support"],
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Все",
+                    callback_data="admin:support:all",
+                    icon_custom_emoji_id=NEWS_EMOJI["view"],
+                ),
+                InlineKeyboardButton(
+                    text="Закрытые",
+                    callback_data="admin:support:closed",
+                    icon_custom_emoji_id=NEWS_EMOJI["check"],
+                ),
+            ],
+            [home_button()],
         ]
     )
 
@@ -160,23 +267,38 @@ def bonus_keyboard(
                 InlineKeyboardButton(
                     text="Открыть секретное предложение",
                     callback_data="bonus:secret",
-                    icon_custom_emoji_id="5309958691854754293",
+                    icon_custom_emoji_id=NEWS_EMOJI["gift"],
                     style="primary",
                 )
             ],
-            [InlineKeyboardButton(text=daily_label, callback_data="bonus:daily")],
             [
                 InlineKeyboardButton(
-                    text="Активировать промокод", callback_data="bonus:promo"
+                    text=daily_label,
+                    callback_data="bonus:daily",
+                    icon_custom_emoji_id=NEWS_EMOJI["check"],
+                    style="success" if not daily_claimed else None,
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="Пригласить друга", callback_data="bonus:referral"
-                ),
-                InlineKeyboardButton(text="История", callback_data="bonus:history"),
+                    text="Активировать промокод",
+                    callback_data="bonus:promo",
+                    icon_custom_emoji_id=NEWS_EMOJI["promo"],
+                )
             ],
-            [InlineKeyboardButton(text="Главное меню", callback_data="home")],
+            [
+                InlineKeyboardButton(
+                    text="Пригласить друга",
+                    callback_data="bonus:referral",
+                    icon_custom_emoji_id=NEWS_EMOJI["invite"],
+                ),
+                InlineKeyboardButton(
+                    text="История",
+                    callback_data="bonus:history",
+                    icon_custom_emoji_id=NEWS_EMOJI["history"],
+                ),
+            ],
+            [home_button()],
         ]
     )
 
@@ -199,6 +321,7 @@ def secret_offer_keyboard(
                         InlineKeyboardButton(
                             text="Доставка · +50 ₽ / +25 ⭐",
                             callback_data=f"fulfill:delivery:{product_id}:{offer_id}",
+                            icon_custom_emoji_id=NEWS_EMOJI["delivery"],
                             style="primary",
                         )
                     ],
@@ -206,6 +329,7 @@ def secret_offer_keyboard(
                         InlineKeyboardButton(
                             text="Самовывоз · Гостиный Двор",
                             callback_data=f"fulfill:pickup:{product_id}:{offer_id}",
+                            icon_custom_emoji_id=NEWS_EMOJI["home"],
                         )
                     ],
                 ]
@@ -217,12 +341,16 @@ def secret_offer_keyboard(
                         InlineKeyboardButton(
                             text=f"Забрать по СБП · {price_rub} ₽",
                             callback_data=f"secret:buy:rolly:{offer_id}",
+                            icon_custom_emoji_id=NEWS_EMOJI["pay"],
+                            style="success",
                         )
                     ],
                     [
                         InlineKeyboardButton(
                             text=f"Забрать за {price_stars} ⭐",
                             callback_data=f"secret:buy:stars:{offer_id}",
+                            icon_custom_emoji_id=NEWS_EMOJI["stars"],
+                            style="success",
                         )
                     ],
                 ]
@@ -237,7 +365,7 @@ def fulfillment_cancel_keyboard(back_callback: str = "catalog") -> InlineKeyboar
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="← Назад", callback_data=back_callback)],
-            [InlineKeyboardButton(text="Главное меню", callback_data="home")],
+            [home_button()],
         ]
     )
 
@@ -253,7 +381,7 @@ def checkout_keyboard(
                 InlineKeyboardButton(
                     text=f"Оплатить по СБП · {amount_rub} ₽",
                     callback_data="checkout:rolly",
-                    icon_custom_emoji_id="5350452584119279096",
+                    icon_custom_emoji_id=NEWS_EMOJI["pay"],
                     style="success",
                 )
             ]
@@ -264,13 +392,13 @@ def checkout_keyboard(
                 InlineKeyboardButton(
                     text=f"Оплатить звёздами · {amount_stars} ⭐",
                     callback_data="checkout:stars",
-                    icon_custom_emoji_id="5309958691854754293",
+                    icon_custom_emoji_id=NEWS_EMOJI["stars"],
                     style="success",
                 )
             ]
         )
     rows.append([InlineKeyboardButton(text="← Назад", callback_data=back_callback)])
-    rows.append([InlineKeyboardButton(text="Главное меню", callback_data="home")])
+    rows.append([home_button()])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -293,7 +421,7 @@ def home_inline_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     text="Главное меню",
                     callback_data="home",
-                    icon_custom_emoji_id="5309958691854754293",
+                    icon_custom_emoji_id=NEWS_EMOJI["home"],
                     style="primary",
                 )
             ]
@@ -309,7 +437,7 @@ def bonus_back_keyboard() -> InlineKeyboardMarkup:
                     text="← В бонусный клуб", callback_data="bonus:back"
                 )
             ],
-            [InlineKeyboardButton(text="Главное меню", callback_data="home")],
+            [home_button()],
         ]
     )
 
@@ -318,7 +446,7 @@ def admin_back_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="← В управление", callback_data="admin:home")],
-            [InlineKeyboardButton(text="Главное меню", callback_data="home")],
+            [home_button()],
         ]
     )
 
@@ -334,12 +462,19 @@ def admin_promos_keyboard(promos: list[PromoCode]) -> InlineKeyboardMarkup:
         for promo in promos
     ]
     rows.append(
-        [InlineKeyboardButton(text="Создать промокод", callback_data="admin:promo:add")]
+        [
+            InlineKeyboardButton(
+                text="Создать промокод",
+                callback_data="admin:promo:add",
+                icon_custom_emoji_id=NEWS_EMOJI["add"],
+                style="success",
+            )
+        ]
     )
     rows.append(
         [InlineKeyboardButton(text="← В управление", callback_data="admin:home")]
     )
-    rows.append([InlineKeyboardButton(text="Главное меню", callback_data="home")])
+    rows.append([home_button()])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -353,11 +488,20 @@ def admin_products_keyboard(products: list[Product]) -> InlineKeyboardMarkup:
         ]
         for p in products
     ]
-    rows.append([InlineKeyboardButton(text="Создать товар", callback_data="admin:add")])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="Создать товар",
+                callback_data="admin:add",
+                icon_custom_emoji_id=NEWS_EMOJI["add"],
+                style="success",
+            )
+        ]
+    )
     rows.append(
         [InlineKeyboardButton(text="← В управление", callback_data="admin:home")]
     )
-    rows.append([InlineKeyboardButton(text="Главное меню", callback_data="home")])
+    rows.append([home_button()])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -366,26 +510,33 @@ def admin_product_keyboard(product: Product) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="⚡ Цена СБП", callback_data=f"admin:edit:rub:{product.id}"
+                    text="Цена СБП",
+                    callback_data=f"admin:edit:rub:{product.id}",
+                    icon_custom_emoji_id=NEWS_EMOJI["pay"],
                 ),
                 InlineKeyboardButton(
-                    text="⭐ Цена Stars", callback_data=f"admin:edit:stars:{product.id}"
+                    text="Цена Stars",
+                    callback_data=f"admin:edit:stars:{product.id}",
+                    icon_custom_emoji_id=NEWS_EMOJI["stars"],
                 ),
             ],
             [
                 InlineKeyboardButton(
-                    text="✏️ Название и описание",
+                    text="Название и описание",
                     callback_data=f"admin:edit:text:{product.id}",
+                    icon_custom_emoji_id=NEWS_EMOJI["edit"],
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="🙈 Скрыть" if product.is_active else "👁 Показать",
+                    text="Скрыть" if product.is_active else "Показать",
                     callback_data=f"admin:toggle:{product.id}",
+                    icon_custom_emoji_id=NEWS_EMOJI["view"],
+                    style="danger" if product.is_active else "success",
                 )
             ],
             [InlineKeyboardButton(text="‹ К товарам", callback_data="admin:products")],
-            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="home")],
+            [home_button()],
         ]
     )
 
@@ -408,15 +559,20 @@ def support_ticket_keyboard(ticket: SupportTicket) -> InlineKeyboardMarkup:
         rows.append(
             [
                 InlineKeyboardButton(
-                    text="✉️ Ответить", callback_data=f"support:reply:{ticket.id}"
+                    text="Ответить",
+                    callback_data=f"support:reply:{ticket.id}",
+                    icon_custom_emoji_id=NEWS_EMOJI["support"],
+                    style="primary",
                 )
             ]
         )
         rows.append(
             [
                 InlineKeyboardButton(
-                    text="✅ Закрыть обращение",
+                    text="Закрыть обращение",
                     callback_data=f"support:close:{ticket.id}",
+                    icon_custom_emoji_id=NEWS_EMOJI["check"],
+                    style="danger",
                 )
             ]
         )
@@ -424,7 +580,10 @@ def support_ticket_keyboard(ticket: SupportTicket) -> InlineKeyboardMarkup:
         rows.append(
             [
                 InlineKeyboardButton(
-                    text="↩️ Открыть снова", callback_data=f"support:reopen:{ticket.id}"
+                    text="Открыть снова",
+                    callback_data=f"support:reopen:{ticket.id}",
+                    icon_custom_emoji_id=NEWS_EMOJI["refresh"],
+                    style="success",
                 )
             ]
         )
@@ -435,7 +594,7 @@ def support_ticket_keyboard(ticket: SupportTicket) -> InlineKeyboardMarkup:
             )
         ]
     )
-    rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="home")])
+    rows.append([home_button()])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -465,7 +624,7 @@ def product_kind_keyboard() -> InlineKeyboardMarkup:
                 )
             ],
             [InlineKeyboardButton(text="✖️ Отменить", callback_data="admin:cancel")],
-            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="home")],
+            [home_button()],
         ]
     )
 
@@ -490,5 +649,5 @@ def support_tickets_keyboard(
     rows.append(
         [InlineKeyboardButton(text="‹ Админ-панель", callback_data="admin:home")]
     )
-    rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="home")])
+    rows.append([home_button()])
     return InlineKeyboardMarkup(inline_keyboard=rows)
