@@ -161,9 +161,18 @@ class CoreTests(unittest.TestCase):
         self.assertIn("Мои заказы", regular_buttons)
         self.assertIn("Поддержка", regular_buttons)
         self.assertNotIn("← Назад", regular_buttons)
+        self.assertIn("Бонусы", regular_buttons)
+        self.assertNotIn("Бонусный клуб", regular_buttons)
         self.assertTrue(
             all(
                 button.icon_custom_emoji_id
+                for row in main_keyboard(False).keyboard
+                for button in row
+            )
+        )
+        self.assertTrue(
+            all(
+                button.style in {"primary", "success", "danger"}
                 for row in main_keyboard(False).keyboard
                 for button in row
             )
@@ -203,6 +212,13 @@ class CoreTests(unittest.TestCase):
             }
             self.assertTrue(
                 actions & {"home", "bonus:back", "support:cancel", "admin:home"}
+            )
+            self.assertTrue(
+                all(
+                    button.style in {"primary", "success", "danger"}
+                    for row in keyboard.inline_keyboard
+                    for button in row
+                )
             )
         self.assertTrue(stars_invoice_keyboard().inline_keyboard[0][0].pay)
 

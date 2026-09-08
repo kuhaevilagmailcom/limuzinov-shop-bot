@@ -470,7 +470,7 @@ async def send_payment(
             await session.commit()
             await message.answer(
                 warning(
-                    "Предложение уже использовано", "Откройте бонусный клуб ещё раз."
+                    "Предложение уже использовано", "Откройте раздел «Бонусы» ещё раз."
                 )
             )
             return
@@ -955,7 +955,7 @@ async def profile(message: Message) -> None:
             f"{username} · <code>{user.telegram_id}</code>\n\n"
             f"Покупок: <b>{user.purchases_count}</b>\n"
             f"Бонусный баланс: <b>{bonus.balance}</b>\n"
-            f"В клубе с <b>{user.created_at:%d.%m.%Y}</b>",
+            f"Зарегистрирован: <b>{user.created_at:%d.%m.%Y}</b>",
             "История покупок хранится в разделе «Мои заказы»",
         ),
         reply_markup=home_inline_keyboard(),
@@ -976,7 +976,7 @@ async def send_bonus_screen(message: Message, user_id: int) -> None:
     await message.answer(
         screen(
             "◇",
-            "LIMYZINOV CLUB",
+            "Бонусы",
             f"Ваш баланс\n<b>{account.balance} бонусов</b>\n\n"
             f"Серия посещений: <b>{daily['streak']} дней</b>\n"
             f"Следующая награда: <b>{daily['next_reward']} бонусов</b>\n\n"
@@ -991,7 +991,7 @@ async def send_bonus_screen(message: Message, user_id: int) -> None:
     )
 
 
-@router.message(F.text.in_({"🎁 Бонусы", "Бонусный клуб"}))
+@router.message(F.text.in_({"🎁 Бонусы", "Бонусный клуб", "Бонусы"}))
 async def bonuses(message: Message) -> None:
     await ensure_user(message)
     await send_bonus_screen(message, message.from_user.id)
@@ -1086,7 +1086,7 @@ async def bonus_callbacks(callback: CallbackQuery, state: FSMContext, bot: Bot) 
             screen(
                 "◇",
                 "Ваше приглашение",
-                "Отправьте эту ссылку человеку, которого действительно хотите видеть в клубе:\n\n"
+                "Отправьте эту ссылку человеку, которого хотите пригласить в магазин:\n\n"
                 f"<code>{html.escape(link)}</code>\n\n"
                 "После его первого запуска вам начислится <b>100 бонусов</b>. "
                 "Новый участник начнёт с <b>50 бонусов</b>.",

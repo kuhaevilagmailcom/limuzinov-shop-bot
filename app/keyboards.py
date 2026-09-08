@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -7,6 +9,38 @@ from aiogram.types import (
 
 from app.config import get_settings
 from app.db import Product, PromoCode, SupportStatus, SupportTicket
+
+_TelegramInlineKeyboardMarkup = InlineKeyboardMarkup
+_TelegramReplyKeyboardMarkup = ReplyKeyboardMarkup
+
+
+def InlineKeyboardMarkup(
+    *, inline_keyboard: list[list[InlineKeyboardButton]]
+) -> _TelegramInlineKeyboardMarkup:
+    """Applies a blue default style so every inline button is visibly colored."""
+    colored_rows = [
+        [
+            button if button.style else button.model_copy(update={"style": "primary"})
+            for button in row
+        ]
+        for row in inline_keyboard
+    ]
+    return _TelegramInlineKeyboardMarkup(inline_keyboard=colored_rows)
+
+
+def ReplyKeyboardMarkup(
+    *, keyboard: list[list[KeyboardButton]], **kwargs
+) -> _TelegramReplyKeyboardMarkup:
+    """Applies the same colored hierarchy to the persistent bottom menu."""
+    colored_rows = [
+        [
+            button if button.style else button.model_copy(update={"style": "primary"})
+            for button in row
+        ]
+        for row in keyboard
+    ]
+    return _TelegramReplyKeyboardMarkup(keyboard=colored_rows, **kwargs)
+
 
 NEWS_EMOJI = {
     "catalog": "5229064374403998351",  # 🛍
@@ -55,9 +89,7 @@ def main_keyboard(admin: bool = False) -> ReplyKeyboardMarkup:
         ],
         [
             KeyboardButton(text="Профиль", icon_custom_emoji_id=NEWS_EMOJI["profile"]),
-            KeyboardButton(
-                text="Бонусный клуб", icon_custom_emoji_id=NEWS_EMOJI["bonus"]
-            ),
+            KeyboardButton(text="Бонусы", icon_custom_emoji_id=NEWS_EMOJI["bonus"]),
         ],
         [KeyboardButton(text="Поддержка", icon_custom_emoji_id=NEWS_EMOJI["support"])],
     ]
@@ -355,9 +387,7 @@ def secret_offer_keyboard(
                     ],
                 ]
             )
-    rows.append(
-        [InlineKeyboardButton(text="← В бонусный клуб", callback_data="bonus:back")]
-    )
+    rows.append([InlineKeyboardButton(text="← В бонусы", callback_data="bonus:back")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -405,11 +435,7 @@ def checkout_keyboard(
 def bonus_cancel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="← В бонусный клуб", callback_data="bonus:cancel"
-                )
-            ]
+            [InlineKeyboardButton(text="← В бонусы", callback_data="bonus:cancel")]
         ]
     )
 
@@ -432,11 +458,7 @@ def home_inline_keyboard() -> InlineKeyboardMarkup:
 def bonus_back_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="← В бонусный клуб", callback_data="bonus:back"
-                )
-            ],
+            [InlineKeyboardButton(text="← В бонусы", callback_data="bonus:back")],
             [home_button()],
         ]
     )
