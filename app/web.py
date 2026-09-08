@@ -38,7 +38,9 @@ def _decimal_or_none(value: object) -> Decimal | None:
 
 def create_web_app(bot: Bot) -> FastAPI:
     """Technical HTTP service only: health check and signed RollyPay callbacks."""
-    app = FastAPI(title="LIMYZINOV SHOP API", docs_url=None, redoc_url=None, openapi_url=None)
+    app = FastAPI(
+        title="LIMYZINOV SHOP API", docs_url=None, redoc_url=None, openapi_url=None
+    )
 
     @app.middleware("http")
     async def secure(request: Request, call_next):
@@ -103,7 +105,10 @@ def create_web_app(bot: Bot) -> FastAPI:
                 order
                 and order.payment_method == "rollypay"
                 and order.provider_payment_id == payment_id
-                and str(event.get("currency", event.get("payment_currency", ""))).upper() == "RUB"
+                and str(
+                    event.get("currency", event.get("payment_currency", ""))
+                ).upper()
+                == "RUB"
                 and _same_amount(event.get("amount"), order.amount_rub)
             )
             if not matches:
@@ -118,7 +123,10 @@ def create_web_app(bot: Bot) -> FastAPI:
                     result="rejected",
                     reason="Payment does not match order",
                     amount=_decimal_or_none(event.get("amount")),
-                    currency=str(event.get("currency", event.get("payment_currency", ""))).upper() or None,
+                    currency=str(
+                        event.get("currency", event.get("payment_currency", ""))
+                    ).upper()
+                    or None,
                     payload_hash=payload_hash,
                 )
                 raise HTTPException(409, "Payment does not match order")
@@ -132,7 +140,13 @@ def create_web_app(bot: Bot) -> FastAPI:
                 )
                 if order and changed:
                     await notify_order_paid(bot, order)
-            elif status in {"processing", "canceled", "expired", "refunded", "chargeback"}:
+            elif status in {
+                "processing",
+                "canceled",
+                "expired",
+                "refunded",
+                "chargeback",
+            }:
                 await update_order_status(session, order_id, status)
             await record_payment_event(
                 session,

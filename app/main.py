@@ -4,12 +4,12 @@ import asyncio
 import logging
 
 import uvicorn
+from aiogram import Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram import Dispatcher
 from aiogram.types import BotCommand
 
-from app.cleanup import CleanBot
+from app.cleanup import CleanBot, DeleteIncomingMessageMiddleware
 from app.config import get_settings
 from app.db import init_db
 from app.handlers import router
@@ -20,8 +20,11 @@ async def main() -> None:
     logging.basicConfig(level=logging.INFO)
     settings = get_settings()
 
-    bot = CleanBot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    bot = CleanBot(
+        settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+    )
     dp = Dispatcher()
+    dp.message.outer_middleware(DeleteIncomingMessageMiddleware())
     dp.include_router(router)
 
     await init_db()

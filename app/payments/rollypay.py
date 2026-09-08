@@ -18,12 +18,19 @@ class RollyPayError(RuntimeError):
 def _error_message(response: httpx.Response) -> str:
     try:
         data = response.json()
-        return str(data.get("detail") or data.get("message") or data.get("error") or "request failed")[:300]
+        return str(
+            data.get("detail")
+            or data.get("message")
+            or data.get("error")
+            or "request failed"
+        )[:300]
     except ValueError:
         return "request failed"
 
 
-async def create_payment(order_id: str, amount: Decimal, description: str, user_id: int) -> dict:
+async def create_payment(
+    order_id: str, amount: Decimal, description: str, user_id: int
+) -> dict:
     settings = get_settings()
     if not settings.rollypay_api_key:
         raise RollyPayError("ROLLYPAY_API_KEY is not configured")
@@ -52,7 +59,9 @@ async def create_payment(order_id: str, amount: Decimal, description: str, user_
             headers=headers,
         )
     if response.is_error:
-        raise RollyPayError(f"RollyPay returned HTTP {response.status_code}: {_error_message(response)}")
+        raise RollyPayError(
+            f"RollyPay returned HTTP {response.status_code}: {_error_message(response)}"
+        )
     try:
         result = response.json()
     except ValueError as exc:
@@ -74,14 +83,21 @@ async def get_payment(payment_id: str) -> dict:
             headers=headers,
         )
     if response.is_error:
-        raise RollyPayError(f"RollyPay returned HTTP {response.status_code}: {_error_message(response)}")
+        raise RollyPayError(
+            f"RollyPay returned HTTP {response.status_code}: {_error_message(response)}"
+        )
     try:
         return response.json()
     except ValueError as exc:
         raise RollyPayError("RollyPay returned invalid JSON") from exc
 
 
-def verify_webhook(raw_body: bytes, timestamp: str | None, signature: str | None, max_age_seconds: int = 300) -> bool:
+def verify_webhook(
+    raw_body: bytes,
+    timestamp: str | None,
+    signature: str | None,
+    max_age_seconds: int = 300,
+) -> bool:
     settings = get_settings()
     if not timestamp or not signature or not settings.rollypay_signing_secret:
         return False

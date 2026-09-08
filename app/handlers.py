@@ -4,6 +4,7 @@ import hashlib
 import html
 import logging
 import re
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
@@ -25,11 +26,13 @@ from sqlalchemy import func, select
 
 from app.config import OWNER_ADMIN_ID, get_settings
 from app.db import (
+    SHOP_TIMEZONE,
     BonusAccount,
     Order,
     OrderStatus,
     Product,
     PromoCode,
+    SecretOffer,
     SessionLocal,
     SupportMessage,
     SupportStatus,
@@ -46,6 +49,7 @@ from app.db import (
     daily_bonus_status,
     get_active_support_ticket,
     get_bonus_account,
+    get_or_create_secret_offer,
     get_or_create_user,
     get_product,
     get_shop_analytics,
@@ -58,6 +62,9 @@ from app.db import (
     record_payment_event,
     redeem_promo_code,
     register_user,
+    release_secret_offer,
+    reserve_secret_offer,
+    save_order_fulfillment,
     set_support_ticket_status,
     support_rate_limited,
     support_ticket_messages,
@@ -73,12 +80,15 @@ from app.keyboards import (
     bonus_cancel_keyboard,
     bonus_keyboard,
     catalog_keyboard,
+    checkout_keyboard,
+    fulfillment_cancel_keyboard,
     home_inline_keyboard,
     main_keyboard,
     payment_url_keyboard,
     product_keyboard,
     product_kind_keyboard,
     product_price,
+    secret_offer_keyboard,
     stars_invoice_keyboard,
     support_cancel_keyboard,
     support_ticket_keyboard,
@@ -92,10 +102,18 @@ router = Router()
 settings = get_settings()
 logger = logging.getLogger(__name__)
 BOT_COVER = Path(__file__).resolve().parent / "static" / "brand" / "hero-banner.png"
+DELIVERY_FEE_RUB = 50
+DELIVERY_FEE_STARS = 25
+PICKUP_ADDRESS = "ТЦ «Гостиный Двор»"
 
 
 class ProductOrderForm(StatesGroup):
     brief = State()
+
+
+class FulfillmentForm(StatesGroup):
+    address = State()
+    ready = State()
 
 
 class AdminAddForm(StatesGroup):
@@ -330,8 +348,17 @@ async def product_card(callback: CallbackQuery) -> None:
                 "◆",
                 html.escape(product.title),
                 f"{html.escape(product.description)}\n\n"
-                f"<b>{product_price(product)}</b>",
-                "Выберите способ оплаты",
+                f"<b>{product_price(product)}</b>\n\n"
+                + (
+                    "<b>Как вам удобно получить заказ?</b>"
+                    if product.kind == "physical"
+                    else "Выберите способ оплаты"
+                ),
+                (
+                    "Доставка или самовывоз — следующий шаг"
+                    if product.kind == "physical"
+                    else "СБП или Telegram Stars"
+                ),
             ),
             reply_markup=product_keyboard(product),
         )
@@ -347,6 +374,9 @@ async def send_payment(
     product_id: int,
     provider: str,
     brief: str = "",
+    fulfillment_method: str = "digital",
+    address: str = "",
+    offer_id: str | None = None,
 ) -> None:
     if provider not in {"rolly", "stars"}:
         await message.answer(
@@ -363,6 +393,64 @@ async def send_payment(
             )
             return
         await get_or_create_user(session, user_id, username, full_name)
+        price_rub = int(product.price_rub or 0)
+        price_stars = int(product.price_stars or 0)
+        offer: SecretOffer | None = None
+        if offer_id:
+            offer = await session.get(SecretOffer, offer_id)
+            expires_at = offer.expires_at if offer else None
+            if expires_at and expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            if (
+                not offer
+                or offer.user_id != user_id
+                or offer.product_id != product.id
+                or offer.status != "active"
+                or not expires_at
+                or expires_at <= datetime.now(timezone.utc)
+            ):
+                await message.answer(
+                    warning(
+                        "Предложение закрыто",
+                        "Срок действия персональной цены закончился.",
+                    ),
+                    reply_markup=bonus_back_keyboard(),
+                )
+                return
+            price_rub = offer.price_rub
+            price_stars = offer.price_stars
+
+        fee_rub = DELIVERY_FEE_RUB if fulfillment_method == "delivery" else 0
+        fee_stars = DELIVERY_FEE_STARS if fulfillment_method == "delivery" else 0
+        if product.kind == "physical" and fulfillment_method not in {
+            "delivery",
+            "pickup",
+        }:
+            await message.answer(
+                warning("Выберите получение", "Укажите доставку или самовывоз.")
+            )
+            return
+        if fulfillment_method == "delivery" and len(address.strip()) < 8:
+            await message.answer(
+                warning("Нужен адрес", "Укажите полный адрес доставки.")
+            )
+            return
+        if fulfillment_method == "pickup":
+            address = PICKUP_ADDRESS
+
+        if provider == "stars" and not price_stars:
+            await message.answer(
+                warning("Stars недоступны", "Цена в Stars ещё не настроена.")
+            )
+            return
+        if provider == "rolly" and not price_rub:
+            await message.answer(
+                warning("СБП недоступна", "Цена в рублях ещё не настроена.")
+            )
+            return
+
+        total_rub = price_rub + fee_rub
+        total_stars = price_stars + fee_stars
         description = brief.strip() if brief else product.description
         order = await create_order(
             session,
@@ -371,21 +459,31 @@ async def send_payment(
             product_key=product.key,
             title=product.title,
             description=description,
-            amount_rub=Decimal(product.price_rub)
-            if product.price_rub and provider != "stars"
-            else None,
-            amount_stars=product.price_stars if provider == "stars" else None,
+            amount_rub=Decimal(total_rub) if provider != "stars" else None,
+            amount_stars=total_stars if provider == "stars" else None,
+        )
+
+        if offer_id and not await reserve_secret_offer(
+            session, offer_id=offer_id, user_id=user_id, order_id=order.id
+        ):
+            order.status = OrderStatus.CANCELED.value
+            await session.commit()
+            await message.answer(
+                warning(
+                    "Предложение уже использовано", "Откройте бонусный клуб ещё раз."
+                )
+            )
+            return
+        await save_order_fulfillment(
+            session,
+            order_id=order.id,
+            method=fulfillment_method,
+            address=address,
+            fee_rub=fee_rub if provider == "rolly" else 0,
+            fee_stars=fee_stars if provider == "stars" else 0,
         )
 
         if provider == "stars":
-            if not product.price_stars:
-                await message.answer(
-                    warning(
-                        "Stars недоступны",
-                        "Для этого товара цена в Stars ещё не настроена.",
-                    )
-                )
-                return
             order.payment_method = "telegram_stars"
             await session.commit()
             await record_payment_event(
@@ -397,36 +495,41 @@ async def send_payment(
                 order_id=order.id,
                 event_status="created",
                 result="accepted",
-                amount=Decimal(product.price_stars),
+                amount=Decimal(total_stars),
                 currency="XTR",
             )
-            await bot.send_invoice(
-                chat_id=message.chat.id,
-                title=product.title[:32],
-                description=(product.description.strip() or "Заказ в LIMYZINOV SHOP")[
-                    :255
-                ],
-                payload=f"order:{order.id}",
-                currency="XTR",
-                prices=[
-                    LabeledPrice(label=product.title[:32], amount=product.price_stars)
-                ],
-                provider_token="",
-                reply_markup=stars_invoice_keyboard(),
-            )
+            try:
+                await bot.send_invoice(
+                    chat_id=message.chat.id,
+                    title=product.title[:32],
+                    description=(
+                        product.description.strip() or "Заказ в LIMYZINOV SHOP"
+                    )[:255],
+                    payload=f"order:{order.id}",
+                    currency="XTR",
+                    prices=[LabeledPrice(label=product.title[:32], amount=total_stars)],
+                    provider_token="",
+                    reply_markup=stars_invoice_keyboard(),
+                )
+            except TelegramAPIError:
+                order.status = OrderStatus.CANCELED.value
+                await session.commit()
+                if offer_id:
+                    await release_secret_offer(
+                        session, offer_id=offer_id, order_id=order.id
+                    )
+                logger.exception("Stars invoice creation failed for order %s", order.id)
+                await message.answer(
+                    warning(
+                        "Не удалось открыть оплату", "Попробуйте ещё раз через минуту."
+                    )
+                )
             return
 
-        if not product.price_rub:
-            await message.answer(
-                warning(
-                    "СБП недоступна", "Для этого товара цена в рублях ещё не настроена."
-                )
-            )
-            return
         try:
             payment = await create_payment(
                 order.id,
-                Decimal(product.price_rub),
+                Decimal(total_rub),
                 f"{product.title} / заказ {order.id[:8]}",
                 user_id,
             )
@@ -444,11 +547,17 @@ async def send_payment(
                 provider_payment_id=order.provider_payment_id,
                 event_status="created",
                 result="accepted",
-                amount=Decimal(product.price_rub),
+                amount=Decimal(total_rub),
                 currency="RUB",
             )
         except (RollyPayError, KeyError):
             logger.exception("Payment creation failed for order %s", order.id)
+            order.status = OrderStatus.CANCELED.value
+            await session.commit()
+            if offer_id:
+                await release_secret_offer(
+                    session, offer_id=offer_id, order_id=order.id
+                )
             await message.answer(
                 warning("Не удалось создать платёж", "Попробуйте ещё раз через минуту.")
             )
@@ -459,12 +568,194 @@ async def send_payment(
             "🧾",
             "Заказ создан",
             f"🛍 {html.escape(product.title)}\n"
-            f"💳 К оплате: <b>{product.price_rub} ₽</b>\n"
-            f"🔖 Номер: <code>{order.id[:8]}</code>",
+            f"💳 К оплате: <b>{total_rub} ₽</b>\n"
+            + (f"📍 {html.escape(address)}\n" if product.kind == "physical" else "")
+            + f"🔖 Номер: <code>{order.id[:8]}</code>",
             "После оплаты нажмите «Проверить платёж»",
         ),
         reply_markup=payment_url_keyboard(pay_url, order.id),
     )
+
+
+async def show_checkout(
+    message: Message,
+    state: FSMContext,
+    *,
+    product: Product,
+    method: str,
+    address: str,
+    offer: SecretOffer | None,
+) -> None:
+    base_rub = offer.price_rub if offer else int(product.price_rub or 0)
+    base_stars = offer.price_stars if offer else int(product.price_stars or 0)
+    fee_rub = DELIVERY_FEE_RUB if method == "delivery" else 0
+    fee_stars = DELIVERY_FEE_STARS if method == "delivery" else 0
+    back_callback = "bonus:secret" if offer else f"product:{product.id}"
+    await state.set_state(FulfillmentForm.ready)
+    await state.update_data(
+        product_id=product.id,
+        method=method,
+        address=address,
+        offer_id=offer.id if offer else None,
+    )
+    method_text = (
+        f"<b>Доставка</b>\n{html.escape(address)}\n"
+        f"Доплата: <b>{fee_rub} ₽</b> или <b>{fee_stars} ⭐</b>"
+        if method == "delivery"
+        else f"<b>Самовывоз</b>\n{PICKUP_ADDRESS}\nБез доплаты"
+    )
+    await message.answer(
+        screen(
+            "◇",
+            "Подтверждение заказа",
+            f"<b>{html.escape(product.title)}</b>\n\n{method_text}\n\n"
+            f"Итого: <b>{base_rub + fee_rub} ₽</b> или "
+            f"<b>{base_stars + fee_stars} ⭐</b>",
+            "Выберите способ оплаты",
+        ),
+        reply_markup=checkout_keyboard(
+            amount_rub=base_rub + fee_rub,
+            amount_stars=base_stars + fee_stars,
+            back_callback=back_callback,
+        ),
+    )
+
+
+@router.callback_query(F.data.startswith("fulfill:"))
+async def choose_fulfillment(callback: CallbackQuery, state: FSMContext) -> None:
+    _, method, raw_product_id, raw_offer_id = callback.data.split(":", 3)
+    if method not in {"delivery", "pickup"} or not raw_product_id.isdigit():
+        await callback.answer("Не удалось выбрать получение", show_alert=True)
+        return
+    async with SessionLocal() as session:
+        product = await get_product(session, int(raw_product_id))
+        offer = (
+            None
+            if raw_offer_id == "0"
+            else await session.get(SecretOffer, raw_offer_id)
+        )
+    if not product or not product.is_active or product.kind != "physical":
+        await callback.answer("Товар недоступен", show_alert=True)
+        return
+    if offer:
+        expiry = offer.expires_at
+        if expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=timezone.utc)
+        if (
+            offer.user_id != callback.from_user.id
+            or offer.product_id != product.id
+            or offer.status != "active"
+            or expiry <= datetime.now(timezone.utc)
+        ):
+            await callback.answer("Предложение уже закрыто", show_alert=True)
+            return
+    elif raw_offer_id != "0":
+        await callback.answer("Предложение не найдено", show_alert=True)
+        return
+
+    if method == "delivery":
+        await state.set_state(FulfillmentForm.address)
+        await state.update_data(
+            product_id=product.id, offer_id=offer.id if offer else None
+        )
+        back_callback = "bonus:secret" if offer else f"product:{product.id}"
+        await callback.message.answer(
+            screen(
+                "◇",
+                "Адрес доставки",
+                "Напишите одним сообщением: <b>город, улицу, дом, квартиру</b> и удобный ориентир.",
+                "К заказу добавится 50 ₽ или 25 ⭐",
+            ),
+            reply_markup=fulfillment_cancel_keyboard(back_callback),
+        )
+    else:
+        await show_checkout(
+            callback.message,
+            state,
+            product=product,
+            method="pickup",
+            address=PICKUP_ADDRESS,
+            offer=offer,
+        )
+    await callback.answer()
+
+
+@router.message(FulfillmentForm.address)
+async def delivery_address(message: Message, state: FSMContext) -> None:
+    address = (message.text or "").strip()
+    if len(address) < 8 or len(address) > 500:
+        await message.answer(
+            warning(
+                "Проверьте адрес", "Напишите полный адрес длиной от 8 до 500 символов."
+            ),
+            reply_markup=fulfillment_cancel_keyboard(),
+        )
+        return
+    data = await state.get_data()
+    async with SessionLocal() as session:
+        product = await get_product(session, int(data["product_id"]))
+        offer_id = data.get("offer_id")
+        offer = await session.get(SecretOffer, offer_id) if offer_id else None
+    if not product or not product.is_active:
+        await state.clear()
+        await message.answer(warning("Товар недоступен", "Вернитесь в каталог."))
+        return
+    await show_checkout(
+        message, state, product=product, method="delivery", address=address, offer=offer
+    )
+
+
+@router.callback_query(F.data.startswith("checkout:"))
+async def checkout(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    provider = callback.data.split(":", 1)[1]
+    data = await state.get_data()
+    if await state.get_state() != FulfillmentForm.ready.state or provider not in {
+        "rolly",
+        "stars",
+    }:
+        await callback.answer("Сначала выберите получение", show_alert=True)
+        return
+    if provider == "rolly" and not settings.rollypay_enabled:
+        await callback.answer("Оплата по СБП сейчас недоступна", show_alert=True)
+        return
+    await state.clear()
+    await send_payment(
+        callback.message,
+        bot,
+        callback.from_user.id,
+        callback.from_user.username,
+        callback.from_user.full_name,
+        int(data["product_id"]),
+        provider,
+        fulfillment_method=str(data["method"]),
+        address=str(data.get("address", "")),
+        offer_id=data.get("offer_id"),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("secret:buy:"))
+async def buy_secret_offer(
+    callback: CallbackQuery, state: FSMContext, bot: Bot
+) -> None:
+    _, _, provider, offer_id = callback.data.split(":", 3)
+    async with SessionLocal() as session:
+        offer = await session.get(SecretOffer, offer_id)
+    if not offer or offer.user_id != callback.from_user.id:
+        await callback.answer("Предложение недоступно", show_alert=True)
+        return
+    await state.clear()
+    await send_payment(
+        callback.message,
+        bot,
+        callback.from_user.id,
+        callback.from_user.username,
+        callback.from_user.full_name,
+        offer.product_id,
+        provider,
+        offer_id=offer.id,
+    )
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("buy:"))
@@ -709,7 +1000,56 @@ async def bonuses(message: Message) -> None:
 @router.callback_query(F.data.startswith("bonus:"))
 async def bonus_callbacks(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     action = callback.data.split(":", 1)[1]
-    if action == "promo":
+    if action == "secret":
+        async with SessionLocal() as session:
+            offer, product = await get_or_create_secret_offer(
+                session, callback.from_user.id
+            )
+        if not offer or not product:
+            await callback.message.answer(
+                screen(
+                    "◇",
+                    "Секретное предложение",
+                    "Сейчас персональных предложений нет.",
+                    "Оно появится, когда в каталоге будет активный товар",
+                ),
+                reply_markup=bonus_back_keyboard(),
+            )
+        else:
+            expiry = offer.expires_at
+            if expiry.tzinfo is None:
+                expiry = expiry.replace(tzinfo=timezone.utc)
+            available = offer.status == "active" and expiry > datetime.now(timezone.utc)
+            if available:
+                body = (
+                    f"Только для вас — <b>{html.escape(product.title)}</b>.\n\n"
+                    f"{html.escape(product.description)}\n\n"
+                    f"Обычная цена: <s>{product.price_rub} ₽ / {product.price_stars} ⭐</s>\n"
+                    f"Ваша цена: <b>{offer.price_rub} ₽ / {offer.price_stars} ⭐</b>\n"
+                    f"Персональная скидка: <b>{offer.discount_percent}%</b>"
+                )
+                footer = f"Предложение исчезнет в {expiry.astimezone(SHOP_TIMEZONE):%H:%M} — через 2 часа после открытия"
+            elif offer.status == "redeemed":
+                body = "Вы уже воспользовались предложением этой недели."
+                footer = "Новое предложение откроется на следующей неделе"
+            elif offer.status == "reserved":
+                body = "Предложение закреплено за созданным заказом и ждёт оплаты."
+                footer = "Откройте «Мои заказы», чтобы проверить статус"
+            else:
+                body = "Время предложения истекло. Оно было доступно ровно 2 часа."
+                footer = "Новое предложение откроется на следующей неделе"
+            await callback.message.answer(
+                screen("✦", "Секретное предложение", body, footer),
+                reply_markup=secret_offer_keyboard(
+                    offer.id,
+                    product_id=product.id,
+                    product_kind=product.kind,
+                    price_rub=offer.price_rub,
+                    price_stars=offer.price_stars,
+                    available=available,
+                ),
+            )
+    elif action == "promo":
         await state.set_state(PromoUserForm.code)
         await callback.message.answer(
             screen("🎟", "Активация промокода", "Отправьте промокод одним сообщением."),

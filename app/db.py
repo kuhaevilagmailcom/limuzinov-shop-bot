@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from enum import StrEnum
@@ -186,6 +187,42 @@ class DailyBonusProfile(Base):
     streak: Mapped[int] = mapped_column(Integer, default=0)
     last_claim_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+
+class SecretOffer(Base):
+    __tablename__ = "secret_offers"
+    __table_args__ = (
+        UniqueConstraint("user_id", "cycle_key", name="uq_secret_offer_cycle"),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid4())
+    )
+    user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    product_id: Mapped[int] = mapped_column(Integer, index=True)
+    cycle_key: Mapped[str] = mapped_column(String(16), index=True)
+    discount_percent: Mapped[int] = mapped_column(Integer)
+    price_rub: Mapped[int] = mapped_column(Integer)
+    price_stars: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(24), default="active", index=True)
+    order_id: Mapped[str | None] = mapped_column(String(36), nullable=True, unique=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class OrderFulfillment(Base):
+    __tablename__ = "order_fulfillments"
+
+    order_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    method: Mapped[str] = mapped_column(String(16))  # delivery | pickup | digital
+    address: Mapped[str] = mapped_column(Text, default="")
+    fee_rub: Mapped[int] = mapped_column(Integer, default=0)
+    fee_stars: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
 
@@ -395,6 +432,132 @@ async def claim_daily_bonus(
         stored = await session.get(DailyBonusProfile, user_id)
         return False, 0, stored.streak if stored else 0
     return True, reward, streak
+
+
+def _offer_cycle(now: datetime) -> str:
+    local = now.astimezone(SHOP_TIMEZONE)
+    year, week, _ = local.isocalendar()
+    return f"{year}-W{week:02d}"
+
+
+async def get_or_create_secret_offer(
+    session: AsyncSession, user_id: int, *, now: datetime | None = None
+) -> tuple[SecretOffer | None, Product | None]:
+    """Returns one deterministic personal offer per user and ISO week."""
+    now = now or datetime.now(timezone.utc)
+    cycle = _offer_cycle(now)
+    existing = await session.scalar(
+        select(SecretOffer).where(
+            SecretOffer.user_id == user_id, SecretOffer.cycle_key == cycle
+        )
+    )
+    if existing is not None:
+        return existing, await session.get(Product, existing.product_id)
+
+    products = await active_products(session)
+    if not products:
+        return None, None
+    digest = hashlib.sha256(f"{user_id}:{cycle}".encode()).digest()
+    product = products[int.from_bytes(digest[:4], "big") % len(products)]
+    discount = (10, 15, 20)[digest[4] % 3]
+    offer = SecretOffer(
+        user_id=user_id,
+        product_id=product.id,
+        cycle_key=cycle,
+        discount_percent=discount,
+        price_rub=max(1, (int(product.price_rub or 0) * (100 - discount) + 99) // 100),
+        price_stars=max(
+            1, (int(product.price_stars or 0) * (100 - discount) + 99) // 100
+        ),
+        expires_at=now + timedelta(hours=2),
+    )
+    session.add(offer)
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        offer = await session.scalar(
+            select(SecretOffer).where(
+                SecretOffer.user_id == user_id, SecretOffer.cycle_key == cycle
+            )
+        )
+        return offer, await session.get(Product, offer.product_id) if offer else None
+    await session.refresh(offer)
+    return offer, product
+
+
+async def reserve_secret_offer(
+    session: AsyncSession,
+    *,
+    offer_id: str,
+    user_id: int,
+    order_id: str,
+    now: datetime | None = None,
+) -> SecretOffer | None:
+    now = now or datetime.now(timezone.utc)
+    result = await session.execute(
+        update(SecretOffer)
+        .where(
+            SecretOffer.id == offer_id,
+            SecretOffer.user_id == user_id,
+            SecretOffer.status == "active",
+            SecretOffer.expires_at > now,
+        )
+        .values(status="reserved", order_id=order_id)
+        .execution_options(synchronize_session=False)
+    )
+    await session.commit()
+    if result.rowcount != 1:
+        return None
+    return await session.scalar(
+        select(SecretOffer)
+        .where(SecretOffer.id == offer_id)
+        .execution_options(populate_existing=True)
+    )
+
+
+async def release_secret_offer(
+    session: AsyncSession, *, offer_id: str, order_id: str
+) -> None:
+    await session.execute(
+        update(SecretOffer)
+        .where(
+            SecretOffer.id == offer_id,
+            SecretOffer.order_id == order_id,
+            SecretOffer.status == "reserved",
+        )
+        .values(status="active", order_id=None)
+        .execution_options(synchronize_session=False)
+    )
+    await session.commit()
+
+
+async def save_order_fulfillment(
+    session: AsyncSession,
+    *,
+    order_id: str,
+    method: str,
+    address: str = "",
+    fee_rub: int = 0,
+    fee_stars: int = 0,
+) -> OrderFulfillment:
+    fulfillment = OrderFulfillment(
+        order_id=order_id,
+        method=method,
+        address=address.strip(),
+        fee_rub=fee_rub,
+        fee_stars=fee_stars,
+    )
+    session.add(fulfillment)
+    await session.commit()
+    await session.refresh(fulfillment)
+    return fulfillment
+
+
+async def get_order_fulfillment(
+    session: AsyncSession, order_id: str
+) -> OrderFulfillment | None:
+    return await session.get(OrderFulfillment, order_id)
 
 
 async def apply_referral(
@@ -612,6 +775,14 @@ async def mark_order_paid(
             .where(User.telegram_id == existing.user_id)
             .values(purchases_count=User.purchases_count + 1)
         )
+        await session.execute(
+            update(SecretOffer)
+            .where(
+                SecretOffer.order_id == order_id,
+                SecretOffer.status == "reserved",
+            )
+            .values(status="redeemed")
+        )
     await session.commit()
     order = await session.get(Order, order_id)
     return order, changed
@@ -635,6 +806,15 @@ async def update_order_status(
         and status not in {OrderStatus.REFUNDED.value, OrderStatus.CHARGEBACK.value}
     ):
         order.status = status
+        if status in {OrderStatus.CANCELED.value, OrderStatus.EXPIRED.value}:
+            await session.execute(
+                update(SecretOffer)
+                .where(
+                    SecretOffer.order_id == order_id,
+                    SecretOffer.status == "reserved",
+                )
+                .values(status="active", order_id=None)
+            )
         await session.commit()
     return order
 

@@ -49,26 +49,45 @@ def catalog_keyboard(products: list[Product]) -> InlineKeyboardMarkup:
 
 
 def product_keyboard(product: Product) -> InlineKeyboardMarkup:
-    settings = get_settings()
     rows: list[list[InlineKeyboardButton]] = []
-    if product.price_rub and settings.rollypay_enabled:
-        rows.append(
+    if product.kind == "physical":
+        rows.extend(
             [
-                InlineKeyboardButton(
-                    text=f"Оплатить по СБП · {product.price_rub} ₽",
-                    callback_data=f"buy:rolly:{product.id}",
-                )
+                [
+                    InlineKeyboardButton(
+                        text="Доставка · +50 ₽ / +25 ⭐",
+                        callback_data=f"fulfill:delivery:{product.id}:0",
+                        style="primary",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="Самовывоз · Гостиный Двор",
+                        callback_data=f"fulfill:pickup:{product.id}:0",
+                    )
+                ],
             ]
         )
-    if product.price_stars:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text=f"Оплатить звёздами · {product.price_stars}",
-                    callback_data=f"buy:stars:{product.id}",
-                )
-            ]
-        )
+    else:
+        settings = get_settings()
+        if product.price_rub and settings.rollypay_enabled:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text=f"Оплатить по СБП · {product.price_rub} ₽",
+                        callback_data=f"buy:rolly:{product.id}",
+                    )
+                ]
+            )
+        if product.price_stars:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text=f"Оплатить звёздами · {product.price_stars} ⭐",
+                        callback_data=f"buy:stars:{product.id}",
+                    )
+                ]
+            )
     rows.append([InlineKeyboardButton(text="← В каталог", callback_data="catalog")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -137,6 +156,13 @@ def bonus_keyboard(
     )
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Открыть секретное предложение",
+                    callback_data="bonus:secret",
+                    style="primary",
+                )
+            ],
             [InlineKeyboardButton(text=daily_label, callback_data="bonus:daily")],
             [
                 InlineKeyboardButton(
@@ -152,6 +178,97 @@ def bonus_keyboard(
             [InlineKeyboardButton(text="Главное меню", callback_data="home")],
         ]
     )
+
+
+def secret_offer_keyboard(
+    offer_id: str,
+    *,
+    product_id: int,
+    product_kind: str,
+    price_rub: int,
+    price_stars: int,
+    available: bool,
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if available:
+        if product_kind == "physical":
+            rows.extend(
+                [
+                    [
+                        InlineKeyboardButton(
+                            text="Доставка · +50 ₽ / +25 ⭐",
+                            callback_data=f"fulfill:delivery:{product_id}:{offer_id}",
+                            style="primary",
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            text="Самовывоз · Гостиный Двор",
+                            callback_data=f"fulfill:pickup:{product_id}:{offer_id}",
+                        )
+                    ],
+                ]
+            )
+        else:
+            rows.extend(
+                [
+                    [
+                        InlineKeyboardButton(
+                            text=f"Забрать по СБП · {price_rub} ₽",
+                            callback_data=f"secret:buy:rolly:{offer_id}",
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            text=f"Забрать за {price_stars} ⭐",
+                            callback_data=f"secret:buy:stars:{offer_id}",
+                        )
+                    ],
+                ]
+            )
+    rows.append(
+        [InlineKeyboardButton(text="← В бонусный клуб", callback_data="bonus:back")]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def fulfillment_cancel_keyboard(back_callback: str = "catalog") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="← Назад", callback_data=back_callback)],
+            [InlineKeyboardButton(text="Главное меню", callback_data="home")],
+        ]
+    )
+
+
+def checkout_keyboard(
+    *, amount_rub: int | None, amount_stars: int | None, back_callback: str
+) -> InlineKeyboardMarkup:
+    settings = get_settings()
+    rows: list[list[InlineKeyboardButton]] = []
+    if amount_rub and settings.rollypay_enabled:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"Оплатить по СБП · {amount_rub} ₽",
+                    callback_data="checkout:rolly",
+                    style="success",
+                )
+            ]
+        )
+    if amount_stars:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"Оплатить звёздами · {amount_stars} ⭐",
+                    callback_data="checkout:stars",
+                    style="success",
+                )
+            ]
+        )
+    rows.append([InlineKeyboardButton(text="← Назад", callback_data=back_callback)])
+    rows.append([InlineKeyboardButton(text="Главное меню", callback_data="home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def bonus_cancel_keyboard() -> InlineKeyboardMarkup:

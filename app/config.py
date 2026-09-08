@@ -4,9 +4,10 @@ from pathlib import Path
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-
 BASE_DIR = Path(__file__).resolve().parent.parent
-DEFAULT_DATABASE_URL = f"sqlite+aiosqlite:///{(BASE_DIR / 'data' / 'shop.db').as_posix()}"
+DEFAULT_DATABASE_URL = (
+    f"sqlite+aiosqlite:///{(BASE_DIR / 'data' / 'shop.db').as_posix()}"
+)
 OWNER_ADMIN_ID = 8464597898
 
 
@@ -47,11 +48,17 @@ class Settings(BaseSettings):
 
     @property
     def rollypay_enabled(self) -> bool:
-        return _is_configured(self.rollypay_api_key) and _is_configured(self.rollypay_signing_secret)
+        return _is_configured(self.rollypay_api_key) and _is_configured(
+            self.rollypay_signing_secret
+        )
 
 
 def _is_configured(value: str) -> bool:
-    return bool(value and value.strip() and value.strip().upper() not in {"CHANGE_ME", "YOUR_TOKEN"})
+    return bool(
+        value
+        and value.strip()
+        and value.strip().upper() not in {"CHANGE_ME", "YOUR_TOKEN"}
+    )
 
 
 @lru_cache

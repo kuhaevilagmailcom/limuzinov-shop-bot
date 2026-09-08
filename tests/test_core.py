@@ -3,7 +3,7 @@ import hmac
 import json
 import time
 import unittest
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call, patch
@@ -21,6 +21,7 @@ from app.db import (
     DailyBonusProfile,
     PaymentEvent,
     Product,
+    SecretOffer,
     SupportStatus,
     add_support_message,
     apply_referral,
@@ -30,12 +31,16 @@ from app.db import (
     create_support_ticket,
     daily_bonus_status,
     get_active_support_ticket,
+    get_or_create_secret_offer,
+    get_order_fulfillment,
     get_shop_analytics,
     list_support_tickets,
     mark_order_paid,
     record_payment_event,
     redeem_promo_code,
     register_user,
+    reserve_secret_offer,
+    save_order_fulfillment,
     set_support_ticket_status,
     support_rate_limited,
     support_ticket_messages,
@@ -47,10 +52,12 @@ from app.keyboards import (
     bonus_back_keyboard,
     bonus_keyboard,
     catalog_keyboard,
+    checkout_keyboard,
     home_inline_keyboard,
     main_keyboard,
     product_keyboard,
     product_kind_keyboard,
+    secret_offer_keyboard,
     stars_invoice_keyboard,
     support_cancel_keyboard,
     support_ticket_keyboard,
@@ -115,6 +122,32 @@ class CoreTests(unittest.TestCase):
         ]
         self.assertTrue(any("Оплатить по СБП" in label for label in buy_labels))
         self.assertTrue(any("Оплатить звёздами" in label for label in buy_labels))
+
+        physical = Product(
+            id=8,
+            key="physical",
+            title="Физический товар",
+            price_rub=100,
+            price_stars=40,
+            kind="physical",
+        )
+        physical_actions = {
+            button.callback_data
+            for row in product_keyboard(physical).inline_keyboard
+            for button in row
+            if button.callback_data
+        }
+        self.assertIn("fulfill:delivery:8:0", physical_actions)
+        self.assertIn("fulfill:pickup:8:0", physical_actions)
+        checkout_labels = [
+            button.text
+            for row in checkout_keyboard(
+                amount_rub=150, amount_stars=65, back_callback="product:8"
+            ).inline_keyboard
+            for button in row
+        ]
+        self.assertIn("Оплатить по СБП · 150 ₽", checkout_labels)
+        self.assertIn("Оплатить звёздами · 65 ⭐", checkout_labels)
 
     def test_admin_main_menu_and_support_controls(self):
         regular_buttons = [
@@ -280,6 +313,87 @@ class SupportDatabaseTests(unittest.IsolatedAsyncioTestCase):
                 status = await daily_bonus_status(session, 500)
                 self.assertEqual(status["streak"], 0)
                 self.assertEqual(status["next_reward"], 10)
+
+    async def test_two_hour_secret_offer_reservation_and_fulfillment(self):
+        async with self.sessions() as session:
+            await register_user(session, 700, "secret", "Покупатель")
+            product = Product(
+                key="gift",
+                title="Подарок",
+                description="Тест",
+                price_rub=1000,
+                price_stars=100,
+                kind="physical",
+                is_active=True,
+            )
+            session.add(product)
+            await session.commit()
+            await session.refresh(product)
+            now = datetime(2026, 9, 8, 10, 0, tzinfo=timezone.utc)
+            offer, selected = await get_or_create_secret_offer(session, 700, now=now)
+            self.assertEqual(selected.id, product.id)
+            self.assertEqual(
+                offer.expires_at.replace(tzinfo=timezone.utc), now + timedelta(hours=2)
+            )
+            same, _ = await get_or_create_secret_offer(
+                session, 700, now=now + timedelta(hours=1)
+            )
+            self.assertEqual(same.id, offer.id)
+            order = await create_order(
+                session,
+                user_id=700,
+                kind="physical",
+                product_key=product.key,
+                title=product.title,
+                amount_stars=offer.price_stars + 25,
+            )
+            reserved = await reserve_secret_offer(
+                session,
+                offer_id=offer.id,
+                user_id=700,
+                order_id=order.id,
+                now=now + timedelta(hours=1),
+            )
+            self.assertIsNotNone(reserved)
+            self.assertIsNone(
+                await reserve_secret_offer(
+                    session, offer_id=offer.id, user_id=700, order_id="another"
+                )
+            )
+            await save_order_fulfillment(
+                session,
+                order_id=order.id,
+                method="delivery",
+                address="Екатеринбург, Ленина, 1",
+                fee_stars=25,
+            )
+            fulfillment = await get_order_fulfillment(session, order.id)
+            self.assertEqual(fulfillment.fee_stars, 25)
+            _, changed = await mark_order_paid(
+                session,
+                order.id,
+                payment_method="telegram_stars",
+                provider_payment_id="stars-1",
+            )
+            self.assertTrue(changed)
+            self.assertEqual(
+                (await session.get(SecretOffer, offer.id)).status, "redeemed"
+            )
+
+            offer_actions = {
+                button.callback_data
+                for row in secret_offer_keyboard(
+                    offer.id,
+                    product_id=product.id,
+                    product_kind="physical",
+                    price_rub=offer.price_rub,
+                    price_stars=offer.price_stars,
+                    available=True,
+                ).inline_keyboard
+                for button in row
+                if button.callback_data
+            }
+            self.assertIn(f"fulfill:delivery:{product.id}:{offer.id}", offer_actions)
 
     async def test_unique_orders_atomic_payment_and_event_log(self):
         async with self.sessions() as session:

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections import defaultdict
+from collections.abc import Awaitable, Callable
+from typing import Any
 
-from aiogram import Bot
-from aiogram.exceptions import TelegramAPIError
+from aiogram import BaseMiddleware, Bot
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
+from aiogram.types import Message, TelegramObject
 
 
 class CleanBot(Bot):
@@ -37,9 +41,33 @@ class CleanBot(Bot):
     async def _replace(self, chat_id: int | str, sender, *args, **kwargs):
         async with self._locks[chat_id]:
             await self._cleanup(chat_id)
-            message = await sender(chat_id, *args, **kwargs)
+            try:
+                message = await sender(chat_id, *args, **kwargs)
+            except TelegramBadRequest:
+                clean_args, clean_kwargs, changed = self._strip_premium_emoji(
+                    args, kwargs
+                )
+                if not changed:
+                    raise
+                message = await sender(chat_id, *clean_args, **clean_kwargs)
             self._remember(chat_id, message)
             return message
+
+    @staticmethod
+    def _strip_premium_emoji(args, kwargs):
+        pattern = re.compile(r'<tg-emoji\s+emoji-id="\d+">(.*?)</tg-emoji>')
+        args = list(args)
+        kwargs = dict(kwargs)
+        changed = False
+        if args and isinstance(args[0], str):
+            value, count = pattern.subn(r"\1", args[0])
+            args[0], changed = value, bool(count)
+        for key in ("text", "caption"):
+            if isinstance(kwargs.get(key), str):
+                value, count = pattern.subn(r"\1", kwargs[key])
+                kwargs[key] = value
+                changed = changed or bool(count)
+        return tuple(args), kwargs, changed
 
     async def send_message(self, chat_id, *args, **kwargs):
         return await self._replace(chat_id, super().send_message, *args, **kwargs)
@@ -52,3 +80,21 @@ class CleanBot(Bot):
 
     async def edit_message_text(self, *args, **kwargs):
         return await super().edit_message_text(*args, **kwargs)
+
+
+class DeleteIncomingMessageMiddleware(BaseMiddleware):
+    """Removes processed user messages so the private chat stays like one clean screen."""
+
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: dict[str, Any],
+    ) -> Any:
+        result = await handler(event, data)
+        if isinstance(event, Message) and not event.successful_payment:
+            try:
+                await event.bot.delete_message(event.chat.id, event.message_id)
+            except TelegramAPIError:
+                pass
+        return result

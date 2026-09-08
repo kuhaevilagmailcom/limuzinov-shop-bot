@@ -1,8 +1,14 @@
 DIVIDER = "—"
+PREMIUM_EMOJI_ID = "5368324170671202286"
+
+
+def premium_emoji(fallback: str) -> str:
+    """Animated Telegram emoji with a normal Unicode fallback."""
+    return f'<tg-emoji emoji-id="{PREMIUM_EMOJI_ID}">{fallback}</tg-emoji>'
 
 
 def screen(icon: str, title: str, body: str, footer: str | None = None) -> str:
-    heading = f"{icon}  <b>{title}</b>" if icon else f"<b>{title}</b>"
+    heading = f"{premium_emoji(icon)}  <b>{title}</b>" if icon else f"<b>{title}</b>"
     text = f"{heading}\n\n{body.strip()}"
     if footer:
         text += f"\n\n{DIVIDER}\n<i>{footer}</i>"
