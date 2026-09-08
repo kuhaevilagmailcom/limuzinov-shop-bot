@@ -11,13 +11,13 @@ from app.db import Product, PromoCode, SupportStatus, SupportTicket
 
 def main_keyboard(admin: bool = False) -> ReplyKeyboardMarkup:
     rows = [
-        [KeyboardButton(text="🛍 Каталог"), KeyboardButton(text="📦 Заказы")],
-        [KeyboardButton(text="👤 Профиль"), KeyboardButton(text="🎁 Бонусы")],
-        [KeyboardButton(text="💬 Поддержка")],
+        [KeyboardButton(text="Каталог"), KeyboardButton(text="Мои заказы")],
+        [KeyboardButton(text="Профиль"), KeyboardButton(text="Бонусный клуб")],
+        [KeyboardButton(text="Поддержка")],
     ]
     if admin:
-        rows.append([KeyboardButton(text="⚙️ Админ-панель")])
-    rows.append([KeyboardButton(text="⬅️ Назад")])
+        rows.append([KeyboardButton(text="Управление магазином")])
+    rows.append([KeyboardButton(text="← Назад")])
     return ReplyKeyboardMarkup(
         keyboard=rows,
         resize_keyboard=True,
@@ -38,13 +38,13 @@ def catalog_keyboard(products: list[Product]) -> InlineKeyboardMarkup:
     rows = [
         [
             InlineKeyboardButton(
-                text=f"{product.emoji} {product.title} · {product_price(product)}",
+                text=f"{product.title} · {product_price(product)}",
                 callback_data=f"product:{product.id}",
             )
         ]
         for product in products
     ]
-    rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="home")])
+    rows.append([InlineKeyboardButton(text="Главное меню", callback_data="home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -55,7 +55,7 @@ def product_keyboard(product: Product) -> InlineKeyboardMarkup:
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=f"⚡ Оплатить по СБП · {product.price_rub} ₽",
+                    text=f"Оплатить по СБП · {product.price_rub} ₽",
                     callback_data=f"buy:rolly:{product.id}",
                 )
             ]
@@ -64,28 +64,26 @@ def product_keyboard(product: Product) -> InlineKeyboardMarkup:
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=f"⭐ Оплатить Stars · {product.price_stars}",
+                    text=f"Оплатить звёздами · {product.price_stars}",
                     callback_data=f"buy:stars:{product.id}",
                 )
             ]
         )
-    rows.append(
-        [InlineKeyboardButton(text="‹ Назад в каталог", callback_data="catalog")]
-    )
+    rows.append([InlineKeyboardButton(text="← В каталог", callback_data="catalog")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def payment_url_keyboard(url: str, order_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="💳 Открыть страницу оплаты", url=url)],
+            [InlineKeyboardButton(text="Перейти к оплате", url=url)],
             [
                 InlineKeyboardButton(
-                    text="🔄 Проверить платёж", callback_data=f"status:{order_id}"
+                    text="Проверить платёж", callback_data=f"status:{order_id}"
                 )
             ],
-            [InlineKeyboardButton(text="‹ Назад в каталог", callback_data="catalog")],
-            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="home")],
+            [InlineKeyboardButton(text="← В каталог", callback_data="catalog")],
+            [InlineKeyboardButton(text="Главное меню", callback_data="home")],
         ]
     )
 
@@ -93,8 +91,8 @@ def payment_url_keyboard(url: str, order_id: str) -> InlineKeyboardMarkup:
 def stars_invoice_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="⭐ Оплатить звёздами", pay=True)],
-            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="home")],
+            [InlineKeyboardButton(text="Оплатить звёздами", pay=True)],
+            [InlineKeyboardButton(text="Главное меню", callback_data="home")],
         ]
     )
 
@@ -102,50 +100,56 @@ def stars_invoice_keyboard() -> InlineKeyboardMarkup:
 def admin_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="📦 Товары", callback_data="admin:products")],
-            [InlineKeyboardButton(text="✨ Создать товар", callback_data="admin:add")],
+            [InlineKeyboardButton(text="Товары", callback_data="admin:products")],
+            [InlineKeyboardButton(text="Создать товар", callback_data="admin:add")],
             [
-                InlineKeyboardButton(
-                    text="📊 Аналитика", callback_data="admin:analytics"
-                ),
-                InlineKeyboardButton(text="🎟 Промокоды", callback_data="admin:promos"),
+                InlineKeyboardButton(text="Аналитика", callback_data="admin:analytics"),
+                InlineKeyboardButton(text="Промокоды", callback_data="admin:promos"),
             ],
             [
                 InlineKeyboardButton(
-                    text="🧾 Логи платежей", callback_data="admin:payments"
+                    text="Журнал платежей", callback_data="admin:payments"
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="💬 Новые обращения", callback_data="admin:support:new"
+                    text="Новые обращения", callback_data="admin:support:new"
                 )
             ],
             [
-                InlineKeyboardButton(text="🗂 Все", callback_data="admin:support:all"),
+                InlineKeyboardButton(text="Все", callback_data="admin:support:all"),
                 InlineKeyboardButton(
-                    text="✅ Закрытые", callback_data="admin:support:closed"
+                    text="Закрытые", callback_data="admin:support:closed"
                 ),
             ],
-            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="home")],
+            [InlineKeyboardButton(text="Главное меню", callback_data="home")],
         ]
     )
 
 
-def bonus_keyboard() -> InlineKeyboardMarkup:
+def bonus_keyboard(
+    *, daily_claimed: bool = False, next_reward: int = 10
+) -> InlineKeyboardMarkup:
+    daily_label = (
+        f"Сегодня получено · завтра {next_reward}"
+        if daily_claimed
+        else f"Получить сегодня · {next_reward} бонусов"
+    )
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [InlineKeyboardButton(text=daily_label, callback_data="bonus:daily")],
             [
                 InlineKeyboardButton(
-                    text="🎟 Ввести промокод", callback_data="bonus:promo"
+                    text="Активировать промокод", callback_data="bonus:promo"
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="👥 Моя ссылка", callback_data="bonus:referral"
+                    text="Пригласить друга", callback_data="bonus:referral"
                 ),
-                InlineKeyboardButton(text="📜 История", callback_data="bonus:history"),
+                InlineKeyboardButton(text="История", callback_data="bonus:history"),
             ],
-            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="home")],
+            [InlineKeyboardButton(text="Главное меню", callback_data="home")],
         ]
     )
 
@@ -155,7 +159,7 @@ def bonus_cancel_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="‹ Назад к бонусам", callback_data="bonus:cancel"
+                    text="← В бонусный клуб", callback_data="bonus:cancel"
                 )
             ]
         ]
@@ -165,7 +169,7 @@ def bonus_cancel_keyboard() -> InlineKeyboardMarkup:
 def home_inline_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="home")]
+            [InlineKeyboardButton(text="← Главное меню", callback_data="home")]
         ]
     )
 
@@ -175,10 +179,10 @@ def bonus_back_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="‹ Назад к бонусам", callback_data="bonus:back"
+                    text="← В бонусный клуб", callback_data="bonus:back"
                 )
             ],
-            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="home")],
+            [InlineKeyboardButton(text="Главное меню", callback_data="home")],
         ]
     )
 
@@ -186,12 +190,8 @@ def bonus_back_keyboard() -> InlineKeyboardMarkup:
 def admin_back_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="‹ Назад в админ-панель", callback_data="admin:home"
-                )
-            ],
-            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="home")],
+            [InlineKeyboardButton(text="← В управление", callback_data="admin:home")],
+            [InlineKeyboardButton(text="Главное меню", callback_data="home")],
         ]
     )
 
@@ -200,23 +200,19 @@ def admin_promos_keyboard(promos: list[PromoCode]) -> InlineKeyboardMarkup:
     rows = [
         [
             InlineKeyboardButton(
-                text=f"{'✅' if promo.is_active else '⛔'} {promo.code} · {promo.bonus_amount} 🎁 · {promo.used_count}/{promo.max_uses}",
+                text=f"{'Активен' if promo.is_active else 'Выключен'} · {promo.code} · {promo.bonus_amount} · {promo.used_count}/{promo.max_uses}",
                 callback_data=f"admin:promo:toggle:{promo.id}",
             )
         ]
         for promo in promos
     ]
     rows.append(
-        [
-            InlineKeyboardButton(
-                text="➕ Создать промокод", callback_data="admin:promo:add"
-            )
-        ]
+        [InlineKeyboardButton(text="Создать промокод", callback_data="admin:promo:add")]
     )
     rows.append(
-        [InlineKeyboardButton(text="‹ Админ-панель", callback_data="admin:home")]
+        [InlineKeyboardButton(text="← В управление", callback_data="admin:home")]
     )
-    rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="home")])
+    rows.append([InlineKeyboardButton(text="Главное меню", callback_data="home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -224,19 +220,17 @@ def admin_products_keyboard(products: list[Product]) -> InlineKeyboardMarkup:
     rows = [
         [
             InlineKeyboardButton(
-                text=f"{p.emoji} {p.title} · {product_price(p)}",
+                text=f"{p.title} · {product_price(p)}",
                 callback_data=f"admin:product:{p.id}",
             )
         ]
         for p in products
     ]
+    rows.append([InlineKeyboardButton(text="Создать товар", callback_data="admin:add")])
     rows.append(
-        [InlineKeyboardButton(text="✨ Создать товар", callback_data="admin:add")]
+        [InlineKeyboardButton(text="← В управление", callback_data="admin:home")]
     )
-    rows.append(
-        [InlineKeyboardButton(text="‹ Админ-панель", callback_data="admin:home")]
-    )
-    rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="home")])
+    rows.append([InlineKeyboardButton(text="Главное меню", callback_data="home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

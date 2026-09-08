@@ -3,6 +3,7 @@ import hmac
 import json
 import time
 import unittest
+from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call, patch
@@ -17,14 +18,17 @@ from app.config import OWNER_ADMIN_ID, Settings
 from app.db import (
     Base,
     BonusAccount,
+    DailyBonusProfile,
     PaymentEvent,
     Product,
     SupportStatus,
     add_support_message,
     apply_referral,
+    claim_daily_bonus,
     create_order,
     create_promo_code,
     create_support_ticket,
+    daily_bonus_status,
     get_active_support_ticket,
     get_shop_analytics,
     list_support_tickets,
@@ -110,7 +114,7 @@ class CoreTests(unittest.TestCase):
             for button in row
         ]
         self.assertTrue(any("Оплатить по СБП" in label for label in buy_labels))
-        self.assertTrue(any("Оплатить Stars" in label for label in buy_labels))
+        self.assertTrue(any("Оплатить звёздами" in label for label in buy_labels))
 
     def test_admin_main_menu_and_support_controls(self):
         regular_buttons = [
@@ -119,11 +123,11 @@ class CoreTests(unittest.TestCase):
         admin_buttons = [
             button.text for row in main_keyboard(True).keyboard for button in row
         ]
-        self.assertNotIn("⚙️ Админ-панель", regular_buttons)
-        self.assertIn("⚙️ Админ-панель", admin_buttons)
-        self.assertIn("📦 Заказы", regular_buttons)
-        self.assertIn("💬 Поддержка", regular_buttons)
-        self.assertIn("⬅️ Назад", regular_buttons)
+        self.assertNotIn("Управление магазином", regular_buttons)
+        self.assertIn("Управление магазином", admin_buttons)
+        self.assertIn("Мои заказы", regular_buttons)
+        self.assertIn("Поддержка", regular_buttons)
+        self.assertIn("← Назад", regular_buttons)
         kind_actions = [
             button.callback_data
             for row in product_kind_keyboard().inline_keyboard
@@ -131,7 +135,10 @@ class CoreTests(unittest.TestCase):
         ]
         self.assertIn("admin:kind:physical", kind_actions)
         self.assertIn("admin:kind:digital", kind_actions)
-        self.assertIn(DIVIDER, screen("✨", "Заголовок", "Текст"))
+        styled = screen("✨", "Заголовок", "Текст", "Подсказка")
+        self.assertIn("<b>Заголовок</b>", styled)
+        self.assertIn("<i>Подсказка</i>", styled)
+        self.assertIn(DIVIDER, styled)
 
     def test_every_main_section_has_back_navigation(self):
         product = Product(
@@ -257,6 +264,22 @@ class SupportDatabaseTests(unittest.IsolatedAsyncioTestCase):
                 ("already_used", 0),
             )
             self.assertEqual((await session.get(BonusAccount, 200)).balance, 125)
+
+    async def test_daily_bonus_streak_and_single_claim_per_day(self):
+        async with self.sessions() as session:
+            await register_user(session, 500, "daily", "Постоянный клиент")
+            with patch("app.db.shop_today", return_value=date(2026, 9, 7)):
+                self.assertEqual(await claim_daily_bonus(session, 500), (True, 10, 1))
+                self.assertEqual(await claim_daily_bonus(session, 500), (False, 0, 1))
+            with patch("app.db.shop_today", return_value=date(2026, 9, 8)):
+                self.assertEqual(await claim_daily_bonus(session, 500), (True, 15, 2))
+            profile = await session.get(DailyBonusProfile, 500)
+            self.assertEqual(profile.streak, 2)
+            self.assertEqual((await session.get(BonusAccount, 500)).balance, 25)
+            with patch("app.db.shop_today", return_value=date(2026, 9, 10)):
+                status = await daily_bonus_status(session, 500)
+                self.assertEqual(status["streak"], 0)
+                self.assertEqual(status["next_reward"], 10)
 
     async def test_unique_orders_atomic_payment_and_event_log(self):
         async with self.sessions() as session:

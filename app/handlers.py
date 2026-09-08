@@ -39,9 +39,11 @@ from app.db import (
     add_support_message,
     all_products,
     apply_referral,
+    claim_daily_bonus,
     create_order,
     create_promo_code,
     create_support_ticket,
+    daily_bonus_status,
     get_active_support_ticket,
     get_bonus_account,
     get_or_create_user,
@@ -212,13 +214,12 @@ async def ensure_user(message: Message) -> User:
 
 def menu_text(user: User) -> str:
     return screen(
-        "✨",
+        "◆",
         "LIMYZINOV SHOP",
-        f"Привет, <b>{html.escape(user.full_name)}</b>!\n\n"
-        "🛍 Выбирайте товары\n"
-        "⚡ Оплачивайте по СБП\n"
-        "⭐ Или используйте Telegram Stars",
-        "Всё просто — нужный раздел уже в меню",
+        f"<b>{html.escape(user.full_name)}</b>, добро пожаловать.\n\n"
+        "Здесь собраны актуальные предложения магазина. "
+        "Выберите позицию, изучите детали и оплатите удобным способом.",
+        "СБП и Telegram Stars · поддержка внутри бота",
     )
 
 
@@ -265,7 +266,7 @@ async def start(message: Message, state: FSMContext, command: CommandObject) -> 
     await send_home(message, state, user)
 
 
-@router.message(F.text.in_({"🏠 Главное меню", "⬅️ Назад"}))
+@router.message(F.text.in_({"🏠 Главное меню", "⬅️ Назад", "← Назад"}))
 async def home_menu(message: Message, state: FSMContext) -> None:
     await send_home(message, state, await ensure_user(message))
 
@@ -287,10 +288,10 @@ async def send_catalog(message: Message, *, edit: bool = False) -> None:
     async with SessionLocal() as session:
         products = await active_products(session)
     text = screen(
-        "🛍",
+        "◆",
         "Каталог",
-        "Выберите товар — покажем описание и способы оплаты.",
-        "Оплата: СБП • Telegram Stars",
+        "Выберите предложение, чтобы открыть описание и варианты оплаты.",
+        "Стоимость указана сразу в рублях и звёздах",
     )
     if not products:
         text = screen(
@@ -305,7 +306,7 @@ async def send_catalog(message: Message, *, edit: bool = False) -> None:
         await message.answer(text, reply_markup=catalog_keyboard(products))
 
 
-@router.message(F.text == "🛍 Каталог")
+@router.message(F.text.in_({"🛍 Каталог", "Каталог"}))
 async def show_catalog(message: Message) -> None:
     await ensure_user(message)
     await send_catalog(message)
@@ -326,11 +327,11 @@ async def product_card(callback: CallbackQuery) -> None:
             return
         await callback.message.edit_text(
             screen(
-                product.emoji,
+                "◆",
                 html.escape(product.title),
                 f"{html.escape(product.description)}\n\n"
-                f"💳 Стоимость: <b>{product_price(product)}</b>",
-                "Выберите удобный способ оплаты",
+                f"<b>{product_price(product)}</b>",
+                "Выберите способ оплаты",
             ),
             reply_markup=product_keyboard(product),
         )
@@ -649,7 +650,7 @@ async def stars_success(message: Message, bot: Bot) -> None:
             await notify_order_paid(bot, order, notify_customer=False)
 
 
-@router.message(F.text.in_({"👤 Профиль", "💰 Баланс"}))
+@router.message(F.text.in_({"👤 Профиль", "💰 Баланс", "Профиль"}))
 async def profile(message: Message) -> None:
     user = await ensure_user(message)
     async with SessionLocal() as session:
@@ -657,15 +658,14 @@ async def profile(message: Message) -> None:
     username = f"@{html.escape(user.username)}" if user.username else "не указан"
     await message.answer(
         screen(
-            "👤",
-            "Профиль LIMYZINOV",
-            f"💎 <b>{html.escape(user.full_name)}</b>\n"
-            f"🔗 {username}\n"
-            f"🆔 <code>{user.telegram_id}</code>\n\n"
-            f"🛍 Покупок: <b>{user.purchases_count}</b>\n"
-            f"🎁 Бонусов: <b>{bonus.balance}</b>\n"
-            f"📅 С нами с: <b>{user.created_at:%d.%m.%Y}</b>",
-            "История покупок доступна в разделе «Заказы»",
+            "◇",
+            "Личный профиль",
+            f"<b>{html.escape(user.full_name)}</b>\n"
+            f"{username} · <code>{user.telegram_id}</code>\n\n"
+            f"Покупок: <b>{user.purchases_count}</b>\n"
+            f"Бонусный баланс: <b>{bonus.balance}</b>\n"
+            f"В клубе с <b>{user.created_at:%d.%m.%Y}</b>",
+            "История покупок хранится в разделе «Мои заказы»",
         ),
         reply_markup=home_inline_keyboard(),
     )
@@ -674,6 +674,7 @@ async def profile(message: Message) -> None:
 async def send_bonus_screen(message: Message, user_id: int) -> None:
     async with SessionLocal() as session:
         account = await get_bonus_account(session, user_id)
+        daily = await daily_bonus_status(session, user_id)
         invited = (
             await session.execute(
                 select(func.count())
@@ -683,19 +684,23 @@ async def send_bonus_screen(message: Message, user_id: int) -> None:
         ).scalar_one()
     await message.answer(
         screen(
-            "🎁",
-            "Бонусный клуб",
-            f"💰 Баланс: <b>{account.balance} бонусов</b>\n"
-            f"👥 Приглашено друзей: <b>{invited}</b>\n\n"
-            "За каждого нового друга вы получите <b>100 бонусов</b>, "
-            "а друг — <b>50 бонусов</b>.",
-            "Промокод можно активировать только один раз",
+            "◇",
+            "LIMYZINOV CLUB",
+            f"Ваш баланс\n<b>{account.balance} бонусов</b>\n\n"
+            f"Серия посещений: <b>{daily['streak']} дней</b>\n"
+            f"Следующая награда: <b>{daily['next_reward']} бонусов</b>\n\n"
+            f"Приглашено друзей: <b>{invited}</b>\n"
+            "За нового участника вы получаете <b>100</b>, ваш друг — <b>50</b>.",
+            "Заходите каждый день: серия открывает более крупные награды",
         ),
-        reply_markup=bonus_keyboard(),
+        reply_markup=bonus_keyboard(
+            daily_claimed=bool(daily["claimed"]),
+            next_reward=int(daily["next_reward"]),
+        ),
     )
 
 
-@router.message(F.text == "🎁 Бонусы")
+@router.message(F.text.in_({"🎁 Бонусы", "Бонусный клуб"}))
 async def bonuses(message: Message) -> None:
     await ensure_user(message)
     await send_bonus_screen(message, message.from_user.id)
@@ -710,16 +715,42 @@ async def bonus_callbacks(callback: CallbackQuery, state: FSMContext, bot: Bot) 
             screen("🎟", "Активация промокода", "Отправьте промокод одним сообщением."),
             reply_markup=bonus_cancel_keyboard(),
         )
+    elif action == "daily":
+        async with SessionLocal() as session:
+            claimed, reward, streak = await claim_daily_bonus(
+                session, callback.from_user.id
+            )
+        if claimed:
+            await callback.message.answer(
+                success(
+                    "Бонус получен",
+                    f"На баланс зачислено <b>{reward} бонусов</b>.\n"
+                    f"Текущая серия — <b>{streak} дней</b>.",
+                ),
+                reply_markup=bonus_back_keyboard(),
+            )
+        else:
+            await callback.message.answer(
+                screen(
+                    "·",
+                    "Сегодня уже получено",
+                    "Следующая награда откроется завтра. Серия сохранена.",
+                    "Новый день начинается по времени Екатеринбурга",
+                ),
+                reply_markup=bonus_back_keyboard(),
+            )
     elif action == "referral":
         me = await bot.get_me()
         link = f"https://t.me/{me.username}?start=ref_{callback.from_user.id}"
         await callback.message.answer(
             screen(
-                "👥",
-                "Пригласить друга",
-                f"Ваша персональная ссылка:\n<code>{html.escape(link)}</code>\n\n"
-                "Вы получите <b>100 бонусов</b>, друг — <b>50 бонусов</b>.",
-                "Награда начисляется за нового пользователя",
+                "◇",
+                "Ваше приглашение",
+                "Отправьте эту ссылку человеку, которого действительно хотите видеть в клубе:\n\n"
+                f"<code>{html.escape(link)}</code>\n\n"
+                "После его первого запуска вам начислится <b>100 бонусов</b>. "
+                "Новый участник начнёт с <b>50 бонусов</b>.",
+                "Одно приглашение · одна награда · без повторных начислений",
             ),
             reply_markup=bonus_back_keyboard(),
         )
@@ -727,19 +758,22 @@ async def bonus_callbacks(callback: CallbackQuery, state: FSMContext, bot: Bot) 
         async with SessionLocal() as session:
             items = await recent_bonus_transactions(session, callback.from_user.id)
         labels = {
-            "promo": "🎟 Промокод",
-            "referral_join": "🎁 Вход по приглашению",
-            "referral_invite": "👥 Приглашённый друг",
+            "promo": "Промокод",
+            "referral_join": "Приветственный бонус",
+            "referral_invite": "Приглашение друга",
+            "daily": "Ежедневная награда",
         }
         body = (
             "\n".join(
-                f"{labels.get(item.reason, '🎁 Бонусы')}: <b>{item.amount:+d}</b> · {item.created_at:%d.%m.%Y}"
+                f"<b>{item.amount:+d}</b>  {labels.get(item.reason, 'Начисление')}\n"
+                f"<i>{item.created_at:%d.%m.%Y}</i>"
                 for item in items
             )
             or "Операций пока нет."
         )
         await callback.message.answer(
-            screen("📜", "История бонусов", body), reply_markup=bonus_back_keyboard()
+            screen("·", "История начислений", body),
+            reply_markup=bonus_back_keyboard(),
         )
     elif action in {"cancel", "back"}:
         await state.clear()
@@ -776,12 +810,12 @@ async def redeem_promo(message: Message, state: FSMContext) -> None:
         return
     await state.clear()
     await message.answer(
-        success("Промокод активирован", f"Начислено <b>{amount} бонусов</b> 🎁")
+        success("Промокод активирован", f"На баланс начислено <b>{amount} бонусов</b>.")
     )
     await send_bonus_screen(message, message.from_user.id)
 
 
-@router.message(F.text.in_({"📦 Заказы", "📦 Мои покупки"}))
+@router.message(F.text.in_({"📦 Заказы", "📦 Мои покупки", "Мои заказы"}))
 async def my_orders(message: Message) -> None:
     await ensure_user(message)
     async with SessionLocal() as session:
@@ -817,19 +851,18 @@ async def my_orders(message: Message) -> None:
     )
 
 
-@router.message(F.text.in_({"💬 Поддержка", "🆘 Поддержка"}))
+@router.message(F.text.in_({"💬 Поддержка", "🆘 Поддержка", "Поддержка"}))
 @router.message(Command("paysupport"))
 async def support(message: Message, state: FSMContext) -> None:
     await ensure_user(message)
     await state.set_state(SupportUserForm.content)
     await message.answer(
         screen(
-            "💬",
+            "◇",
             "Поддержка",
-            "Опишите вопрос одним сообщением. Можно прикрепить:\n\n"
-            "📝 текст   🖼 фото   🎬 видео\n"
-            "📎 документ   🎙 голосовое",
-            "Сообщение сразу получит владелец магазина",
+            "Расскажите, что произошло, одним сообщением. "
+            "Можно приложить фотографию, видео, документ или голосовую запись.",
+            "Сообщение получит владелец магазина — ответ придёт в этот чат",
         ),
         reply_markup=support_cancel_keyboard(),
     )
@@ -1018,7 +1051,7 @@ async def show_id(message: Message) -> None:
 
 
 @router.message(Command("admin"))
-@router.message(F.text == "⚙️ Админ-панель")
+@router.message(F.text.in_({"⚙️ Админ-панель", "Управление магазином"}))
 async def admin_panel(message: Message, state: FSMContext) -> None:
     await state.clear()
     if not is_admin(message.from_user.id):

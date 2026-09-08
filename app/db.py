@@ -1,14 +1,16 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    Date,
     DateTime,
     Integer,
     Numeric,
@@ -55,9 +57,13 @@ class User(Base):
     telegram_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     username: Mapped[str | None] = mapped_column(String(64), nullable=True)
     full_name: Mapped[str] = mapped_column(String(255), default="")
-    balance_rub: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0.00"))
+    balance_rub: Mapped[Decimal] = mapped_column(
+        Numeric(12, 2), default=Decimal("0.00")
+    )
     purchases_count: Mapped[int] = mapped_column(Integer, default=0)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
 
 
 class Product(Base):
@@ -73,13 +79,17 @@ class Product(Base):
     kind: Mapped[str] = mapped_column(String(32), default="physical")
     requires_brief: Mapped[bool] = mapped_column(Boolean, default=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
 
 
 class Order(Base):
     __tablename__ = "orders"
 
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid4())
+    )
     user_id: Mapped[int] = mapped_column(BigInteger, index=True)
     kind: Mapped[str] = mapped_column(String(32))  # physical | digital_song
     product_key: Mapped[str] = mapped_column(String(64))
@@ -88,10 +98,18 @@ class Order(Base):
     amount_rub: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     amount_stars: Mapped[int | None] = mapped_column(Integer, nullable=True)
     payment_method: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    provider_payment_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
-    status: Mapped[str] = mapped_column(String(32), default=OrderStatus.CREATED.value, index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-    paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    provider_payment_id: Mapped[str | None] = mapped_column(
+        String(255), nullable=True, index=True
+    )
+    status: Mapped[str] = mapped_column(
+        String(32), default=OrderStatus.CREATED.value, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    paid_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class SupportTicket(Base):
@@ -101,10 +119,18 @@ class SupportTicket(Base):
     user_id: Mapped[int] = mapped_column(BigInteger, index=True)
     username: Mapped[str | None] = mapped_column(String(64), nullable=True)
     full_name: Mapped[str] = mapped_column(String(255), default="")
-    status: Mapped[str] = mapped_column(String(32), default=SupportStatus.NEW.value, index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-    last_message_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
-    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(32), default=SupportStatus.NEW.value, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    last_message_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True
+    )
+    closed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class SupportMessage(Base):
@@ -117,7 +143,9 @@ class SupportMessage(Base):
     body: Mapped[str] = mapped_column(Text, default="")
     source_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     delivered_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True
+    )
 
 
 class BonusAccount(Base):
@@ -125,20 +153,41 @@ class BonusAccount(Base):
 
     user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     balance: Mapped[int] = mapped_column(Integer, default=0)
-    referred_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    referred_by: Mapped[int | None] = mapped_column(
+        BigInteger, nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
 
 
 class BonusTransaction(Base):
     __tablename__ = "bonus_transactions"
-    __table_args__ = (UniqueConstraint("user_id", "reason", "reference", name="uq_bonus_reason_reference"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "reason", "reference", name="uq_bonus_reason_reference"
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(BigInteger, index=True)
     amount: Mapped[int] = mapped_column(Integer)
     reason: Mapped[str] = mapped_column(String(32))
     reference: Mapped[str] = mapped_column(String(128))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True
+    )
+
+
+class DailyBonusProfile(Base):
+    __tablename__ = "daily_bonus_profiles"
+
+    user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    streak: Mapped[int] = mapped_column(Integer, default=0)
+    last_claim_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
 
 
 class PromoCode(Base):
@@ -150,7 +199,9 @@ class PromoCode(Base):
     max_uses: Mapped[int] = mapped_column(Integer)
     used_count: Mapped[int] = mapped_column(Integer, default=0)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
 
 
 class PromoRedemption(Base):
@@ -161,7 +212,9 @@ class PromoRedemption(Base):
     promo_id: Mapped[int] = mapped_column(Integer, index=True)
     user_id: Mapped[int] = mapped_column(BigInteger, index=True)
     bonus_amount: Mapped[int] = mapped_column(Integer)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True
+    )
 
 
 class PaymentEvent(Base):
@@ -171,7 +224,9 @@ class PaymentEvent(Base):
     event_key: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     provider: Mapped[str] = mapped_column(String(32), index=True)
     order_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
-    provider_payment_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    provider_payment_id: Mapped[str | None] = mapped_column(
+        String(255), nullable=True, index=True
+    )
     event_status: Mapped[str] = mapped_column(String(32))
     result: Mapped[str] = mapped_column(String(32), index=True)
     reason: Mapped[str] = mapped_column(String(255), default="")
@@ -179,19 +234,27 @@ class PaymentEvent(Base):
     currency: Mapped[str | None] = mapped_column(String(8), nullable=True)
     payload_hash: Mapped[str] = mapped_column(String(64), default="")
     delivery_count: Mapped[int] = mapped_column(Integer, default=1)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
-    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
 
 
 class PaymentReceipt(Base):
     __tablename__ = "payment_receipts"
-    __table_args__ = (UniqueConstraint("provider", "provider_payment_id", name="uq_provider_payment"),)
+    __table_args__ = (
+        UniqueConstraint("provider", "provider_payment_id", name="uq_provider_payment"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     provider: Mapped[str] = mapped_column(String(32), index=True)
     provider_payment_id: Mapped[str] = mapped_column(String(255), index=True)
     order_id: Mapped[str] = mapped_column(String(36), index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
 
 
 settings = get_settings()
@@ -208,7 +271,9 @@ async def init_db() -> None:
         await conn.run_sync(Base.metadata.create_all)
     async with SessionLocal() as session:
         for seed in PRODUCT_SEEDS:
-            existing = await session.scalar(select(Product).where(Product.key == seed.key))
+            existing = await session.scalar(
+                select(Product).where(Product.key == seed.key)
+            )
             if existing is None:
                 session.add(
                     Product(
@@ -222,7 +287,9 @@ async def init_db() -> None:
                         requires_brief=seed.requires_brief,
                     )
                 )
-        await session.execute(delete(Product).where(Product.key.in_(REMOVED_PRODUCT_KEYS)))
+        await session.execute(
+            delete(Product).where(Product.key.in_(REMOVED_PRODUCT_KEYS))
+        )
         await session.commit()
 
 
@@ -245,7 +312,9 @@ async def register_user(
     return user, created
 
 
-async def get_or_create_user(session: AsyncSession, telegram_id: int, username: str | None, full_name: str) -> User:
+async def get_or_create_user(
+    session: AsyncSession, telegram_id: int, username: str | None, full_name: str
+) -> User:
     user, _ = await register_user(session, telegram_id, username, full_name)
     return user
 
@@ -257,6 +326,75 @@ async def get_bonus_account(session: AsyncSession, user_id: int) -> BonusAccount
         session.add(account)
         await session.flush()
     return account
+
+
+DAILY_REWARDS = (10, 15, 20, 25, 30, 40, 50)
+SHOP_TIMEZONE = ZoneInfo("Asia/Yekaterinburg")
+
+
+def shop_today() -> date:
+    return datetime.now(SHOP_TIMEZONE).date()
+
+
+async def daily_bonus_status(
+    session: AsyncSession, user_id: int
+) -> dict[str, int | bool]:
+    today = shop_today()
+    profile = await session.get(DailyBonusProfile, user_id)
+    if profile is None:
+        return {"claimed": False, "streak": 0, "next_reward": DAILY_REWARDS[0]}
+    claimed = profile.last_claim_date == today
+    if claimed or profile.last_claim_date == today - timedelta(days=1):
+        next_streak = profile.streak % len(DAILY_REWARDS) + 1
+        visible_streak = profile.streak
+    else:
+        next_streak = 1
+        visible_streak = 0
+    return {
+        "claimed": claimed,
+        "streak": visible_streak,
+        "next_reward": DAILY_REWARDS[next_streak - 1],
+    }
+
+
+async def claim_daily_bonus(
+    session: AsyncSession, user_id: int
+) -> tuple[bool, int, int]:
+    """Credits the daily reward once per shop-local calendar day."""
+    today = shop_today()
+    profile = await session.get(DailyBonusProfile, user_id)
+    if profile is not None and profile.last_claim_date == today:
+        return False, 0, profile.streak
+
+    previous_streak = profile.streak if profile else 0
+    continued = profile is not None and profile.last_claim_date == today - timedelta(
+        days=1
+    )
+    streak = previous_streak % len(DAILY_REWARDS) + 1 if continued else 1
+    reward = DAILY_REWARDS[streak - 1]
+    account = await get_bonus_account(session, user_id)
+    if profile is None:
+        profile = DailyBonusProfile(user_id=user_id)
+        session.add(profile)
+    profile.streak = streak
+    profile.last_claim_date = today
+    profile.updated_at = datetime.now(timezone.utc)
+    account.balance += reward
+    session.add(
+        BonusTransaction(
+            user_id=user_id,
+            amount=reward,
+            reason="daily",
+            reference=today.isoformat(),
+        )
+    )
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        stored = await session.get(DailyBonusProfile, user_id)
+        return False, 0, stored.streak if stored else 0
+    return True, reward, streak
 
 
 async def apply_referral(
@@ -280,8 +418,18 @@ async def apply_referral(
     reference = str(new_user_id)
     session.add_all(
         [
-            BonusTransaction(user_id=new_user_id, amount=new_user_bonus, reason="referral_join", reference=reference),
-            BonusTransaction(user_id=referrer_id, amount=referrer_bonus, reason="referral_invite", reference=reference),
+            BonusTransaction(
+                user_id=new_user_id,
+                amount=new_user_bonus,
+                reason="referral_join",
+                reference=reference,
+            ),
+            BonusTransaction(
+                user_id=referrer_id,
+                amount=referrer_bonus,
+                reason="referral_invite",
+                reference=reference,
+            ),
         ]
     )
     try:
@@ -292,7 +440,9 @@ async def apply_referral(
     return True
 
 
-async def redeem_promo_code(session: AsyncSession, *, user_id: int, code: str) -> tuple[str, int]:
+async def redeem_promo_code(
+    session: AsyncSession, *, user_id: int, code: str
+) -> tuple[str, int]:
     normalized = code.strip().upper()
     promo = await session.scalar(select(PromoCode).where(PromoCode.code == normalized))
     if promo is None:
@@ -300,13 +450,19 @@ async def redeem_promo_code(session: AsyncSession, *, user_id: int, code: str) -
     if not promo.is_active:
         return "inactive", 0
     already_used = await session.scalar(
-        select(PromoRedemption.id).where(PromoRedemption.promo_id == promo.id, PromoRedemption.user_id == user_id)
+        select(PromoRedemption.id).where(
+            PromoRedemption.promo_id == promo.id, PromoRedemption.user_id == user_id
+        )
     )
     if already_used is not None:
         return "already_used", 0
     claimed = await session.execute(
         update(PromoCode)
-        .where(PromoCode.id == promo.id, PromoCode.is_active.is_(True), PromoCode.used_count < PromoCode.max_uses)
+        .where(
+            PromoCode.id == promo.id,
+            PromoCode.is_active.is_(True),
+            PromoCode.used_count < PromoCode.max_uses,
+        )
         .values(used_count=PromoCode.used_count + 1)
     )
     if claimed.rowcount != 1:
@@ -314,7 +470,11 @@ async def redeem_promo_code(session: AsyncSession, *, user_id: int, code: str) -
         return "limit_reached", 0
     account = await get_bonus_account(session, user_id)
     account.balance += promo.bonus_amount
-    session.add(PromoRedemption(promo_id=promo.id, user_id=user_id, bonus_amount=promo.bonus_amount))
+    session.add(
+        PromoRedemption(
+            promo_id=promo.id, user_id=user_id, bonus_amount=promo.bonus_amount
+        )
+    )
     session.add(
         BonusTransaction(
             user_id=user_id,
@@ -334,7 +494,9 @@ async def redeem_promo_code(session: AsyncSession, *, user_id: int, code: str) -
 async def create_promo_code(
     session: AsyncSession, *, code: str, bonus_amount: int, max_uses: int
 ) -> PromoCode | None:
-    promo = PromoCode(code=code.strip().upper(), bonus_amount=bonus_amount, max_uses=max_uses)
+    promo = PromoCode(
+        code=code.strip().upper(), bonus_amount=bonus_amount, max_uses=max_uses
+    )
     session.add(promo)
     try:
         await session.commit()
@@ -346,11 +508,15 @@ async def create_promo_code(
 
 
 async def list_promo_codes(session: AsyncSession, limit: int = 30) -> list[PromoCode]:
-    result = await session.execute(select(PromoCode).order_by(PromoCode.id.desc()).limit(limit))
+    result = await session.execute(
+        select(PromoCode).order_by(PromoCode.id.desc()).limit(limit)
+    )
     return list(result.scalars())
 
 
-async def recent_bonus_transactions(session: AsyncSession, user_id: int, limit: int = 10) -> list[BonusTransaction]:
+async def recent_bonus_transactions(
+    session: AsyncSession, user_id: int, limit: int = 10
+) -> list[BonusTransaction]:
     result = await session.execute(
         select(BonusTransaction)
         .where(BonusTransaction.user_id == user_id)
@@ -406,7 +572,12 @@ async def mark_order_paid(
                 provider_payment_id=provider_payment_id,
                 order_id=order_id,
             )
-            .on_conflict_do_nothing(index_elements=[PaymentReceipt.provider, PaymentReceipt.provider_payment_id])
+            .on_conflict_do_nothing(
+                index_elements=[
+                    PaymentReceipt.provider,
+                    PaymentReceipt.provider_payment_id,
+                ]
+            )
         )
         receipt = await session.scalar(
             select(PaymentReceipt).where(
@@ -446,7 +617,9 @@ async def mark_order_paid(
     return order, changed
 
 
-async def update_order_status(session: AsyncSession, order_id: str, status: str) -> Order | None:
+async def update_order_status(
+    session: AsyncSession, order_id: str, status: str
+) -> Order | None:
     order = await session.get(Order, order_id)
     if order is None:
         return None
@@ -481,36 +654,46 @@ async def record_payment_event(
     payload_hash: str = "",
 ) -> bool:
     """Upserts a sanitized payment event and counts duplicate deliveries."""
-    existed = await session.scalar(select(PaymentEvent.id).where(PaymentEvent.event_key == event_key))
+    existed = await session.scalar(
+        select(PaymentEvent.id).where(PaymentEvent.event_key == event_key)
+    )
     now = datetime.now(timezone.utc)
-    statement = sqlite_insert(PaymentEvent).values(
-        event_key=event_key,
-        provider=provider,
-        order_id=order_id,
-        provider_payment_id=provider_payment_id,
-        event_status=event_status[:32],
-        result=result[:32],
-        reason=reason[:255],
-        amount=amount,
-        currency=currency[:8] if currency else None,
-        payload_hash=payload_hash[:64],
-        delivery_count=1,
-        created_at=now,
-        last_seen_at=now,
-    ).on_conflict_do_update(
-        index_elements=[PaymentEvent.event_key],
-        set_={
-            "delivery_count": PaymentEvent.delivery_count + 1,
-            "last_seen_at": now,
-        },
+    statement = (
+        sqlite_insert(PaymentEvent)
+        .values(
+            event_key=event_key,
+            provider=provider,
+            order_id=order_id,
+            provider_payment_id=provider_payment_id,
+            event_status=event_status[:32],
+            result=result[:32],
+            reason=reason[:255],
+            amount=amount,
+            currency=currency[:8] if currency else None,
+            payload_hash=payload_hash[:64],
+            delivery_count=1,
+            created_at=now,
+            last_seen_at=now,
+        )
+        .on_conflict_do_update(
+            index_elements=[PaymentEvent.event_key],
+            set_={
+                "delivery_count": PaymentEvent.delivery_count + 1,
+                "last_seen_at": now,
+            },
+        )
     )
     await session.execute(statement)
     await session.commit()
     return existed is None
 
 
-async def recent_payment_events(session: AsyncSession, limit: int = 20) -> list[PaymentEvent]:
-    result = await session.execute(select(PaymentEvent).order_by(PaymentEvent.last_seen_at.desc()).limit(limit))
+async def recent_payment_events(
+    session: AsyncSession, limit: int = 20
+) -> list[PaymentEvent]:
+    result = await session.execute(
+        select(PaymentEvent).order_by(PaymentEvent.last_seen_at.desc()).limit(limit)
+    )
     return list(result.scalars())
 
 
@@ -519,7 +702,9 @@ async def get_shop_analytics(session: AsyncSession) -> dict[str, object]:
     users = (await session.execute(select(func.count()).select_from(User))).scalar_one()
     paid_buyers = (
         await session.execute(
-            select(func.count(func.distinct(Order.user_id))).where(Order.status == OrderStatus.PAID.value)
+            select(func.count(func.distinct(Order.user_id))).where(
+                Order.status == OrderStatus.PAID.value
+            )
         )
     ).scalar_one()
 
@@ -555,9 +740,14 @@ async def get_shop_analytics(session: AsyncSession) -> dict[str, object]:
     }
 
 
-async def recent_orders(session: AsyncSession, user_id: int, limit: int = 10) -> list[Order]:
+async def recent_orders(
+    session: AsyncSession, user_id: int, limit: int = 10
+) -> list[Order]:
     result = await session.execute(
-        select(Order).where(Order.user_id == user_id).order_by(Order.created_at.desc()).limit(limit)
+        select(Order)
+        .where(Order.user_id == user_id)
+        .order_by(Order.created_at.desc())
+        .limit(limit)
     )
     return list(result.scalars())
 
@@ -590,10 +780,15 @@ async def get_product_by_key(session: AsyncSession, key: str) -> Product | None:
     return await session.scalar(select(Product).where(Product.key == key))
 
 
-async def get_active_support_ticket(session: AsyncSession, user_id: int) -> SupportTicket | None:
+async def get_active_support_ticket(
+    session: AsyncSession, user_id: int
+) -> SupportTicket | None:
     return await session.scalar(
         select(SupportTicket)
-        .where(SupportTicket.user_id == user_id, SupportTicket.status != SupportStatus.CLOSED.value)
+        .where(
+            SupportTicket.user_id == user_id,
+            SupportTicket.status != SupportStatus.CLOSED.value,
+        )
         .order_by(SupportTicket.id.desc())
         .limit(1)
     )
@@ -645,7 +840,9 @@ async def add_support_message(
     return item
 
 
-async def support_rate_limited(session: AsyncSession, user_id: int, seconds: int = 10) -> bool:
+async def support_rate_limited(
+    session: AsyncSession, user_id: int, seconds: int = 10
+) -> bool:
     last_sent = await session.scalar(
         select(SupportMessage.created_at)
         .join(SupportTicket, SupportTicket.id == SupportMessage.ticket_id)
@@ -669,7 +866,9 @@ async def list_support_tickets(
     query = select(SupportTicket)
     if status:
         query = query.where(SupportTicket.status == status)
-    result = await session.execute(query.order_by(SupportTicket.last_message_at.desc()).limit(limit))
+    result = await session.execute(
+        query.order_by(SupportTicket.last_message_at.desc()).limit(limit)
+    )
     return list(result.scalars())
 
 
@@ -696,7 +895,9 @@ async def set_support_ticket_status(
     if ticket is None:
         return None
     ticket.status = status.value
-    ticket.closed_at = datetime.now(timezone.utc) if status == SupportStatus.CLOSED else None
+    ticket.closed_at = (
+        datetime.now(timezone.utc) if status == SupportStatus.CLOSED else None
+    )
     await session.commit()
     await session.refresh(ticket)
     return ticket
