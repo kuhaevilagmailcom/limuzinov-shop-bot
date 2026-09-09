@@ -4,7 +4,7 @@ import hashlib
 import html
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
@@ -114,6 +114,8 @@ CAPTION_LIMIT = 1024
 DELIVERY_FEE_RUB = 50
 DELIVERY_FEE_STARS = 25
 PICKUP_ADDRESS = "ТЦ «Гостиный Двор»"
+DELIVERY_DAYS_MIN = 0
+DELIVERY_DAYS_MAX = 30
 
 
 class ProductOrderForm(StatesGroup):
@@ -122,6 +124,8 @@ class ProductOrderForm(StatesGroup):
 
 class FulfillmentForm(StatesGroup):
     address = State()
+    date = State()
+    time = State()
     ready = State()
 
 
@@ -163,6 +167,83 @@ SUPPORT_CONTENT_TYPES = {
 
 def money(value: Decimal) -> str:
     return f"{value:.2f}".replace(".00", "")
+
+
+def parse_schedule_date(raw: str) -> date | None:
+    """Accepts day-of-month 01-31 or a full date DD.MM / DD.MM.YYYY."""
+    value = (raw or "").strip()
+    if not value:
+        return None
+    today = datetime.now(SHOP_TIMEZONE).date()
+    if value.isdigit():
+        if not 1 <= int(value) <= 31:
+            return None
+        try:
+            day = date(today.year, today.month, int(value))
+        except ValueError:
+            return None
+        if day < today:
+            try:
+                year, month = (
+                    (today.year + 1, 1) if today.month == 12 else (today.year, today.month + 1)
+                )
+                return date(year, month, int(value))
+            except ValueError:
+                return None
+        return day
+    parts = value.split(".")
+    if len(parts) == 2 and all(part.isdigit() for part in parts):
+        day, month = int(parts[0]), int(parts[1])
+        try:
+            parsed = date(today.year, month, day)
+        except ValueError:
+            return None
+        if parsed < today:
+            try:
+                return date(today.year + 1, month, day)
+            except ValueError:
+                return None
+        return parsed
+    if (
+        len(parts) == 3
+        and all(part.isdigit() for part in parts)
+        and len(parts[2]) == 4
+    ):
+        try:
+            return date(int(parts[2]), int(parts[1]), int(parts[0]))
+        except ValueError:
+            return None
+    return None
+
+
+def parse_schedule_time(raw: str) -> str | None:
+    """Accepts 10, 14:30 or 21:00 and returns HH:MM inside 10:00–23:00."""
+    value = (raw or "").strip().replace(".", ":").replace(" ", ":")
+    parts = [part for part in value.split(":") if part != ""]
+    if not parts or not all(part.isdigit() for part in parts):
+        return None
+    if len(parts) == 1:
+        hour, minute = int(parts[0]), 0
+    elif len(parts) == 2:
+        hour, minute = int(parts[0]), int(parts[1])
+    else:
+        return None
+    if minute not in {0, 30} or not 10 <= hour <= 23:
+        return None
+    if hour == 23 and minute == 30:
+        return None
+    return f"{hour:02d}:{minute:02d}"
+
+
+def schedule_label(scheduled_date: date | None, scheduled_time: str | None) -> str:
+    if not scheduled_date and not scheduled_time:
+        return "не указано"
+    parts = []
+    if scheduled_date:
+        parts.append(f"<b>{scheduled_date:%d.%m.%Y}</b>")
+    if scheduled_time:
+        parts.append(f"<b>{scheduled_time}</b>")
+    return " · ".join(parts)
 
 
 def is_admin(user_id: int) -> bool:
@@ -365,7 +446,7 @@ async def send_catalog(message: Message, *, edit: bool = False) -> None:
             "Новые товары уже готовятся к появлению.",
             "Загляните немного позже",
         )
-    if edit:
+    if edit and not SECTION_IMAGES["catalog"].exists():
         await send_or_edit(message, text, catalog_keyboard(products))
     else:
         await send_section(message, "catalog", text, catalog_keyboard(products))
@@ -378,13 +459,15 @@ async def show_catalog(message: Message) -> None:
 
 
 @router.callback_query(F.data == "catalog")
-async def show_catalog_callback(callback: CallbackQuery) -> None:
+async def show_catalog_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
     await send_catalog(callback.message, edit=True)
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith("product:"))
-async def product_card(callback: CallbackQuery) -> None:
+async def product_card(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
     async with SessionLocal() as session:
         product = await get_product(session, int(callback.data.rsplit(":", 1)[1]))
         if not product or not product.is_active:
@@ -425,10 +508,12 @@ async def send_payment(
     fulfillment_method: str = "digital",
     address: str = "",
     offer_id: str | None = None,
+    scheduled_date: date | None = None,
+    scheduled_time: str | None = None,
 ) -> None:
-    if provider not in {"rolly", "stars"}:
+    if provider not in {"rolly", "stars", "cash"}:
         await message.answer(
-            warning("Оплата недоступна", "Выберите СБП или Telegram Stars.")
+            warning("Оплата недоступна", "Выберите СБП, Telegram Stars или наличные.")
         )
         return
     async with SessionLocal() as session:
@@ -496,6 +581,23 @@ async def send_payment(
                 warning("СБП недоступна", "Цена в рублях ещё не настроена.")
             )
             return
+        if provider == "cash":
+            if product.kind == "digital":
+                await message.answer(
+                    warning(
+                        "Только онлайн-оплата",
+                        "Цифровой товар оплачивается СБП или Telegram Stars.",
+                    )
+                )
+                return
+            if not price_rub:
+                await message.answer(
+                    warning(
+                        "Оплата наличными недоступна",
+                        "Для этого товара не настроена цена в рублях.",
+                    )
+                )
+                return
 
         total_rub = price_rub + fee_rub
         total_stars = price_stars + fee_stars
@@ -527,9 +629,59 @@ async def send_payment(
             order_id=order.id,
             method=fulfillment_method,
             address=address,
-            fee_rub=fee_rub if provider == "rolly" else 0,
+            fee_rub=fee_rub if provider in {"rolly", "cash"} else 0,
             fee_stars=fee_stars if provider == "stars" else 0,
+            scheduled_date=scheduled_date,
+            scheduled_time=scheduled_time,
         )
+
+        if provider == "cash":
+            order, changed = await mark_order_paid(
+                session, order.id, payment_method="cash"
+            )
+            if not changed or order is None:
+                await message.answer(
+                    warning(
+                        "Заказ уже обработан",
+                        "Проверьте раздел «Мои заказы» и попробуйте снова.",
+                    )
+                )
+                return
+            await record_payment_event(
+                session,
+                event_key=hashlib.sha256(
+                    f"paid:cash:{order.id}".encode()
+                ).hexdigest(),
+                provider="cash",
+                order_id=order.id,
+                event_status="paid",
+                result="accepted",
+                amount=Decimal(total_rub),
+                currency="RUB",
+            )
+            await notify_order_paid(
+                bot,
+                order,
+                notify_customer=False,
+                schedule_note=schedule_label(scheduled_date, scheduled_time),
+            )
+            await message.answer(
+                success(
+                    "Заказ принят",
+                    f"🛍 {html.escape(product.title)}\n"
+                    f"💵 Оплата наличными при получении: <b>{total_rub} ₽</b>\n"
+                    + (
+                        f"📍 {html.escape(address)}\n"
+                        if fulfillment_method == "delivery"
+                        else ""
+                    )
+                    + f"📅 Получение: {schedule_label(scheduled_date, scheduled_time)}\n"
+                    f"🔖 Номер: <code>{order.id[:8]}</code>\n\n"
+                    "Магазин уже получил заказ и подтвердит его в этом чате.",
+                ),
+                reply_markup=home_inline_keyboard(),
+            )
+            return
 
         if provider == "stars":
             order.payment_method = "telegram_stars"
@@ -618,6 +770,11 @@ async def send_payment(
             f"🛍 {html.escape(product.title)}\n"
             f"💳 К оплате: <b>{total_rub} ₽</b>\n"
             + (f"📍 {html.escape(address)}\n" if product.kind == "physical" else "")
+            + (
+                f"📅 Получение: {schedule_label(scheduled_date, scheduled_time)}\n"
+                if scheduled_date or scheduled_time
+                else ""
+            )
             + f"🔖 Номер: <code>{order.id[:8]}</code>",
             "После оплаты нажмите «Проверить платёж»",
         ),
@@ -633,6 +790,8 @@ async def show_checkout(
     method: str,
     address: str,
     offer: SecretOffer | None,
+    schedule_date: date | None = None,
+    schedule_time: str | None = None,
 ) -> None:
     base_rub = offer.price_rub if offer else int(product.price_rub or 0)
     base_stars = offer.price_stars if offer else int(product.price_stars or 0)
@@ -645,6 +804,8 @@ async def show_checkout(
         method=method,
         address=address,
         offer_id=offer.id if offer else None,
+        schedule_date=schedule_date.isoformat() if schedule_date else None,
+        schedule_time=schedule_time,
     )
     method_text = (
         f"<b>Доставка</b>\n{html.escape(address)}\n"
@@ -652,11 +813,16 @@ async def show_checkout(
         if method == "delivery"
         else f"<b>Самовывоз</b>\n{PICKUP_ADDRESS}\nБез доплаты"
     )
+    schedule_text = (
+        f"\n\n📅 Получение: <b>{schedule_label(schedule_date, schedule_time)}</b>"
+        if schedule_date or schedule_time
+        else ""
+    )
     await message.answer(
         screen(
             "◇",
             "Подтверждение заказа",
-            f"<b>{html.escape(product.title)}</b>\n\n{method_text}\n\n"
+            f"<b>{html.escape(product.title)}</b>\n\n{method_text}{schedule_text}\n\n"
             f"Итого: <b>{base_rub + fee_rub} ₽</b> или "
             f"<b>{base_stars + fee_stars} ⭐</b>",
             "Выберите способ оплаты",
@@ -666,6 +832,120 @@ async def show_checkout(
             amount_stars=base_stars + fee_stars,
             back_callback=back_callback,
         ),
+    )
+
+
+async def ask_schedule(
+    message: Message,
+    state: FSMContext,
+    *,
+    product: Product,
+    method: str,
+    address: str,
+    offer: SecretOffer | None,
+) -> None:
+    back_callback = "bonus:secret" if offer else f"product:{product.id}"
+    await state.set_state(FulfillmentForm.date)
+    await state.update_data(
+        product_id=product.id,
+        method=method,
+        address=address,
+        offer_id=offer.id if offer else None,
+    )
+    await message.answer(
+        screen(
+            "📅",
+            "Дата получения",
+            "Напишите число месяца, когда удобно забрать заказ — от <b>01</b> до <b>31</b>.\n\n"
+            "Можно указанием и месяца: <b>15.06</b>.",
+            f"Заказы принимаются на {DELIVERY_DAYS_MAX} дней вперёд",
+        ),
+        reply_markup=fulfillment_cancel_keyboard(back_callback),
+    )
+
+
+@router.message(FulfillmentForm.date)
+async def schedule_date(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    back_callback = (
+        "bonus:secret"
+        if data.get("offer_id")
+        else f"product:{int(data['product_id'])}"
+    )
+    cancel = fulfillment_cancel_keyboard(back_callback)
+    parsed = parse_schedule_date(message.text or "")
+    if parsed is None:
+        await message.answer(
+            warning(
+                "Проверьте дату",
+                "Нужно число месяца от 01 до 31. Например: <b>15</b> или <b>15.06</b>.",
+            ),
+            reply_markup=cancel,
+        )
+        return
+    today = datetime.now(SHOP_TIMEZONE).date()
+    if not DELIVERY_DAYS_MIN <= (parsed - today).days <= DELIVERY_DAYS_MAX:
+        await message.answer(
+            warning(
+                "Дата недоступна",
+                f"Выберите дату в пределах {DELIVERY_DAYS_MAX} дней от сегодня.",
+            ),
+            reply_markup=cancel,
+        )
+        return
+    await state.update_data(schedule_date=parsed.isoformat())
+    await state.set_state(FulfillmentForm.time)
+    await message.answer(
+        screen(
+            "🕒",
+            "Время получения",
+            "Напишите время от <b>10:00</b> до <b>23:00</b> с шагом в полчаса.\n"
+            "Например: <b>14</b> или <b>18:30</b>.",
+            "Шаг установки: 10:00, 10:30, 11:00 … 23:00",
+        ),
+        reply_markup=cancel,
+    )
+
+
+@router.message(FulfillmentForm.time)
+async def schedule_time(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    back_callback = (
+        "bonus:secret"
+        if data.get("offer_id")
+        else f"product:{int(data['product_id'])}"
+    )
+    cancel = fulfillment_cancel_keyboard(back_callback)
+    parsed = parse_schedule_time(message.text or "")
+    if parsed is None:
+        await message.answer(
+            warning(
+                "Проверьте время",
+                "Нужно время от 10:00 до 23:00 с шагом в полчаса. "
+                "Например: <b>14</b> или <b>18:30</b>.",
+            ),
+            reply_markup=cancel,
+        )
+        return
+    await state.update_data(schedule_time=parsed)
+    data = await state.get_data()
+    async with SessionLocal() as session:
+        product = await get_product(session, int(data["product_id"]))
+        offer_id = data.get("offer_id")
+        offer = await session.get(SecretOffer, offer_id) if offer_id else None
+    if not product or not product.is_active:
+        await state.clear()
+        await message.answer(warning("Товар недоступен", "Вернитесь в каталог."))
+        return
+    await show_checkout(
+        message,
+        state,
+        product=product,
+        method=str(data["method"]),
+        address=str(data.get("address", "")),
+        offer=offer,
+        schedule_date=date.fromisoformat(data["schedule_date"]),
+        schedule_time=str(data["schedule_time"]),
     )
 
 
@@ -717,7 +997,7 @@ async def choose_fulfillment(callback: CallbackQuery, state: FSMContext) -> None
             reply_markup=fulfillment_cancel_keyboard(back_callback),
         )
     else:
-        await show_checkout(
+        await ask_schedule(
             callback.message,
             state,
             product=product,
@@ -748,8 +1028,13 @@ async def delivery_address(message: Message, state: FSMContext) -> None:
         await state.clear()
         await message.answer(warning("Товар недоступен", "Вернитесь в каталог."))
         return
-    await show_checkout(
-        message, state, product=product, method="delivery", address=address, offer=offer
+    await ask_schedule(
+        message,
+        state,
+        product=product,
+        method="delivery",
+        address=address,
+        offer=offer,
     )
 
 
@@ -760,6 +1045,7 @@ async def checkout(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None
     if await state.get_state() != FulfillmentForm.ready.state or provider not in {
         "rolly",
         "stars",
+        "cash",
     }:
         await callback.answer("Сначала выберите получение", show_alert=True)
         return
@@ -767,6 +1053,11 @@ async def checkout(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None
         await callback.answer("Оплата по СБП сейчас недоступна", show_alert=True)
         return
     await state.clear()
+    schedule_date = (
+        date.fromisoformat(data["schedule_date"])
+        if data.get("schedule_date")
+        else None
+    )
     await send_payment(
         callback.message,
         bot,
@@ -778,6 +1069,8 @@ async def checkout(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None
         fulfillment_method=str(data["method"]),
         address=str(data.get("address", "")),
         offer_id=data.get("offer_id"),
+        scheduled_date=schedule_date,
+        scheduled_time=data.get("schedule_time"),
     )
     await callback.answer()
 

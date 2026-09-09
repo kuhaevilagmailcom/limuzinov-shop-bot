@@ -427,6 +427,17 @@ def checkout_keyboard(
                 )
             ]
         )
+    if amount_rub:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"Наличными при получении · {amount_rub} ₽",
+                    callback_data="checkout:cash",
+                    icon_custom_emoji_id=NEWS_EMOJI["pay"],
+                    style="primary",
+                )
+            ]
+        )
     rows.append([InlineKeyboardButton(text="← Назад", callback_data=back_callback)])
     rows.append([home_button()])
     return InlineKeyboardMarkup(inline_keyboard=rows)

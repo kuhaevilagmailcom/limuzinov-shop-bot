@@ -16,9 +16,11 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.cleanup import CleanBot
 from app.config import OWNER_ADMIN_ID, Settings
 from app.db import (
+    SHOP_TIMEZONE,
     Base,
     BonusAccount,
     DailyBonusProfile,
+    OrderStatus,
     PaymentEvent,
     Product,
     SecretOffer,
@@ -148,6 +150,53 @@ class CoreTests(unittest.TestCase):
         ]
         self.assertIn("Оплатить по СБП · 150 ₽", checkout_labels)
         self.assertIn("Оплатить звёздами · 65 ⭐", checkout_labels)
+        self.assertIn("Наличными при получении · 150 ₽", checkout_labels)
+        self.assertIn(
+            "checkout:cash",
+            [
+                button.callback_data
+                for row in checkout_keyboard(
+                    amount_rub=150, amount_stars=65, back_callback="product:8"
+                ).inline_keyboard
+                for button in row
+                if button.callback_data
+            ],
+        )
+        without_rub = [
+            button.text
+            for row in checkout_keyboard(
+                amount_rub=None, amount_stars=65, back_callback="product:8"
+            ).inline_keyboard
+            for button in row
+        ]
+        self.assertFalse(any("Наличными" in label for label in without_rub))
+
+    def test_schedule_date_parsing(self):
+        from app.handlers import parse_schedule_date
+
+        self.assertIsNone(parse_schedule_date(""))
+        self.assertIsNone(parse_schedule_date("0"))
+        self.assertIsNone(parse_schedule_date("32"))
+        self.assertIsNone(parse_schedule_date("abc"))
+        self.assertIsNone(parse_schedule_date("31.02.2026"))
+        parsed = parse_schedule_date("15")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed.day, 15)
+        self.assertGreaterEqual(parsed, datetime.now(SHOP_TIMEZONE).date())
+        self.assertEqual(parse_schedule_date("25.12.2027"), date(2027, 12, 25))
+
+    def test_schedule_time_parsing(self):
+        from app.handlers import parse_schedule_time
+
+        self.assertEqual(parse_schedule_time("14"), "14:00")
+        self.assertEqual(parse_schedule_time("14:00"), "14:00")
+        self.assertEqual(parse_schedule_time("18:30"), "18:30")
+        self.assertEqual(parse_schedule_time("23:00"), "23:00")
+        self.assertIsNone(parse_schedule_time("09:00"))
+        self.assertIsNone(parse_schedule_time("23:30"))
+        self.assertIsNone(parse_schedule_time("24"))
+        self.assertIsNone(parse_schedule_time("18:15"))
+        self.assertIsNone(parse_schedule_time("вечером"))
 
     def test_admin_main_menu_and_support_controls(self):
         regular_buttons = [
@@ -417,6 +466,39 @@ class SupportDatabaseTests(unittest.IsolatedAsyncioTestCase):
                 if button.callback_data
             }
             self.assertIn(f"fulfill:delivery:{product.id}:{offer.id}", offer_actions)
+
+    async def test_cash_order_is_paid_and_keeps_schedule(self):
+        async with self.sessions() as session:
+            await register_user(session, 910, "cash_buyer", "Покупатель")
+            order = await create_order(
+                session,
+                user_id=910,
+                kind="physical",
+                product_key="cash-order",
+                title="Билет",
+                amount_rub=Decimal("1550.00"),
+            )
+            await save_order_fulfillment(
+                session,
+                order_id=order.id,
+                method="delivery",
+                address="Екатеринбург, Ленина, 1",
+                fee_rub=50,
+                scheduled_date=date(2026, 9, 15),
+                scheduled_time="18:30",
+            )
+            marked, changed = await mark_order_paid(
+                session, order.id, payment_method="cash"
+            )
+            self.assertTrue(changed)
+            self.assertEqual(marked.status, OrderStatus.PAID.value)
+            self.assertEqual(marked.payment_method, "cash")
+            fulfillment = await get_order_fulfillment(session, order.id)
+            self.assertEqual(fulfillment.scheduled_date, date(2026, 9, 15))
+            self.assertEqual(fulfillment.scheduled_time, "18:30")
+            self.assertEqual(fulfillment.fee_rub, 50)
+            analytics = await get_shop_analytics(session)
+            self.assertEqual(analytics["month"]["orders"], 1)
 
     async def test_unique_orders_atomic_payment_and_event_log(self):
         async with self.sessions() as session:

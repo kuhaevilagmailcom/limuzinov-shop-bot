@@ -20,7 +20,9 @@ from sqlalchemy import (
     UniqueConstraint,
     delete,
     func,
+    inspect,
     select,
+    text,
     update,
 )
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -222,6 +224,8 @@ class OrderFulfillment(Base):
     address: Mapped[str] = mapped_column(Text, default="")
     fee_rub: Mapped[int] = mapped_column(Integer, default=0)
     fee_stars: Mapped[int] = mapped_column(Integer, default=0)
+    scheduled_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    scheduled_time: Mapped[str | None] = mapped_column(String(5), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
@@ -306,6 +310,28 @@ async def init_db() -> None:
             Path(database_path).parent.mkdir(parents=True, exist_ok=True)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+        def _add_schedule_columns(sync_conn) -> None:
+            """Lightweight migration for databases created before the feature."""
+            inspector = inspect(sync_conn)
+            columns = {
+                column["name"]
+                for column in inspector.get_columns("order_fulfillments")
+            }
+            if "scheduled_date" not in columns:
+                sync_conn.execute(
+                    text(
+                        "ALTER TABLE order_fulfillments ADD COLUMN scheduled_date DATE"
+                    )
+                )
+            if "scheduled_time" not in columns:
+                sync_conn.execute(
+                    text(
+                        "ALTER TABLE order_fulfillments ADD COLUMN scheduled_time VARCHAR(5)"
+                    )
+                )
+
+        await conn.run_sync(_add_schedule_columns)
     async with SessionLocal() as session:
         for seed in PRODUCT_SEEDS:
             existing = await session.scalar(
@@ -540,6 +566,8 @@ async def save_order_fulfillment(
     address: str = "",
     fee_rub: int = 0,
     fee_stars: int = 0,
+    scheduled_date: date | None = None,
+    scheduled_time: str | None = None,
 ) -> OrderFulfillment:
     fulfillment = OrderFulfillment(
         order_id=order_id,
@@ -547,6 +575,8 @@ async def save_order_fulfillment(
         address=address.strip(),
         fee_rub=fee_rub,
         fee_stars=fee_stars,
+        scheduled_date=scheduled_date,
+        scheduled_time=scheduled_time,
     )
     session.add(fulfillment)
     await session.commit()
