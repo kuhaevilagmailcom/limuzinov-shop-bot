@@ -986,6 +986,21 @@ async def get_product(session: AsyncSession, product_id: int) -> Product | None:
     return await session.get(Product, product_id)
 
 
+async def delete_product(session: AsyncSession, product_id: int) -> Product | None:
+    """Permanently delete a product and its temporary personal offers.
+
+    Order history is intentionally preserved: it references the product by
+    title and key, so past purchases stay readable after the deletion.
+    """
+    product = await session.get(Product, product_id)
+    if product is None:
+        return None
+    await session.execute(delete(SecretOffer).where(SecretOffer.product_id == product_id))
+    await session.delete(product)
+    await session.commit()
+    return product
+
+
 async def get_product_by_key(session: AsyncSession, key: str) -> Product | None:
     return await session.scalar(select(Product).where(Product.key == key))
 

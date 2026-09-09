@@ -47,6 +47,7 @@ from app.db import (
     create_promo_code,
     create_support_ticket,
     daily_bonus_status,
+    delete_product,
     get_active_support_ticket,
     get_bonus_account,
     get_or_create_secret_offer,
@@ -72,6 +73,7 @@ from app.db import (
 from app.keyboards import (
     admin_back_keyboard,
     admin_cancel_keyboard,
+    admin_delete_product_keyboard,
     admin_keyboard,
     admin_product_keyboard,
     admin_products_keyboard,
@@ -103,11 +105,11 @@ settings = get_settings()
 logger = logging.getLogger(__name__)
 BRAND_DIR = Path(__file__).resolve().parent / "static" / "brand"
 SECTION_IMAGES = {
-    "home": BRAND_DIR / "main.png",
+    "home": BRAND_DIR / "main-menu.png",
     "catalog": BRAND_DIR / "catalog.png",
     "orders": BRAND_DIR / "orders.png",
     "profile": BRAND_DIR / "profile.png",
-    "bonus": BRAND_DIR / "bonus.png",
+    "bonus": BRAND_DIR / "bonuses.png",
     "support": BRAND_DIR / "support.png",
 }
 CAPTION_LIMIT = 1024
@@ -1916,6 +1918,36 @@ async def admin_callbacks(callback: CallbackQuery, state: FSMContext) -> None:
                 )
         await callback.answer("Статус изменён", show_alert=True)
         return
+    elif action[1] == "delete":
+        product_id = int(action[2])
+        async with SessionLocal() as session:
+            product = await get_product(session, product_id)
+        if product is None:
+            await callback.answer("Товар не найден", show_alert=True)
+            return
+        await callback.message.answer(
+            warning(
+                "Удалить товар навсегда?",
+                f"<b>{html.escape(product.title)}</b> исчезнет из каталога и базы. "
+                "История уже созданных заказов сохранится.",
+            ),
+            reply_markup=admin_delete_product_keyboard(product.id),
+        )
+    elif action[1] == "delete_confirm":
+        product_id = int(action[2])
+        async with SessionLocal() as session:
+            product = await delete_product(session, product_id)
+            products = await all_products(session)
+        if product is None:
+            await callback.answer("Товар уже удалён", show_alert=True)
+            return
+        await callback.message.answer(
+            success(
+                "Товар удалён",
+                f"<b>{html.escape(product.title)}</b> полностью удалён из каталога.",
+            ),
+            reply_markup=admin_products_keyboard(products),
+        )
     elif action[1] == "add":
         await state.set_state(AdminAddForm.title)
         await callback.message.answer(

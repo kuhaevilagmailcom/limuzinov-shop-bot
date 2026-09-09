@@ -17,12 +17,9 @@ _TelegramReplyKeyboardMarkup = ReplyKeyboardMarkup
 def InlineKeyboardMarkup(
     *, inline_keyboard: list[list[InlineKeyboardButton]]
 ) -> _TelegramInlineKeyboardMarkup:
-    """Applies a blue default style so every inline button is visibly colored."""
+    """Applies the shop's green style to every inline button."""
     colored_rows = [
-        [
-            button if button.style else button.model_copy(update={"style": "primary"})
-            for button in row
-        ]
+        [button.model_copy(update={"style": "success"}) for button in row]
         for row in inline_keyboard
     ]
     return _TelegramInlineKeyboardMarkup(inline_keyboard=colored_rows)
@@ -31,12 +28,9 @@ def InlineKeyboardMarkup(
 def ReplyKeyboardMarkup(
     *, keyboard: list[list[KeyboardButton]], **kwargs
 ) -> _TelegramReplyKeyboardMarkup:
-    """Applies the same colored hierarchy to the persistent bottom menu."""
+    """Applies the shop's green style to the persistent bottom menu."""
     colored_rows = [
-        [
-            button if button.style else button.model_copy(update={"style": "primary"})
-            for button in row
-        ]
+        [button.model_copy(update={"style": "success"}) for button in row]
         for row in keyboard
     ]
     return _TelegramReplyKeyboardMarkup(keyboard=colored_rows, **kwargs)
@@ -568,7 +562,34 @@ def admin_product_keyboard(product: Product) -> InlineKeyboardMarkup:
                     style="danger" if product.is_active else "success",
                 )
             ],
+            [
+                InlineKeyboardButton(
+                    text="Удалить товар",
+                    callback_data=f"admin:delete:{product.id}",
+                    icon_custom_emoji_id=NEWS_EMOJI["delete"],
+                )
+            ],
             [InlineKeyboardButton(text="‹ К товарам", callback_data="admin:products")],
+            [home_button()],
+        ]
+    )
+
+
+def admin_delete_product_keyboard(product_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Да, удалить навсегда",
+                    callback_data=f"admin:delete_confirm:{product_id}",
+                    icon_custom_emoji_id=NEWS_EMOJI["delete"],
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Отмена", callback_data=f"admin:product:{product_id}"
+                )
+            ],
             [home_button()],
         ]
     )

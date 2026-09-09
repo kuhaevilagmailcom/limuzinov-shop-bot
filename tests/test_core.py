@@ -32,6 +32,7 @@ from app.db import (
     create_promo_code,
     create_support_ticket,
     daily_bonus_status,
+    delete_product,
     get_active_support_ticket,
     get_or_create_secret_offer,
     get_order_fulfillment,
@@ -49,6 +50,7 @@ from app.db import (
 )
 from app.keyboards import (
     admin_back_keyboard,
+    admin_delete_product_keyboard,
     admin_keyboard,
     admin_product_keyboard,
     bonus_back_keyboard,
@@ -212,6 +214,20 @@ class CoreTests(unittest.TestCase):
         self.assertNotIn("← Назад", regular_buttons)
         self.assertIn("Бонусы", regular_buttons)
         self.assertNotIn("Бонусный клуб", regular_buttons)
+        product_controls = {
+            button.callback_data
+            for row in admin_product_keyboard(
+                Product(id=9, key="delete-me", title="Товар")
+            ).inline_keyboard
+            for button in row
+        }
+        self.assertIn("admin:delete:9", product_controls)
+        confirm_controls = {
+            button.callback_data
+            for row in admin_delete_product_keyboard(9).inline_keyboard
+            for button in row
+        }
+        self.assertIn("admin:delete_confirm:9", confirm_controls)
         self.assertTrue(
             all(
                 button.icon_custom_emoji_id
@@ -221,7 +237,7 @@ class CoreTests(unittest.TestCase):
         )
         self.assertTrue(
             all(
-                button.style in {"primary", "success", "danger"}
+                button.style == "success"
                 for row in main_keyboard(False).keyboard
                 for button in row
             )
@@ -264,7 +280,7 @@ class CoreTests(unittest.TestCase):
             )
             self.assertTrue(
                 all(
-                    button.style in {"primary", "success", "danger"}
+                    button.style == "success"
                     for row in keyboard.inline_keyboard
                     for button in row
                 )
@@ -292,6 +308,25 @@ class SupportDatabaseTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         await self.engine.dispose()
+
+    async def test_product_can_be_permanently_deleted(self):
+        async with self.sessions() as session:
+            product = Product(
+                key="temporary",
+                title="Временный товар",
+                price_rub=100,
+                price_stars=10,
+            )
+            session.add(product)
+            await session.commit()
+            await session.refresh(product)
+            product_id = product.id
+
+            deleted = await delete_product(session, product_id)
+
+            self.assertEqual(deleted.title, "Временный товар")
+            self.assertIsNone(await session.get(Product, product_id))
+            self.assertIsNone(await delete_product(session, product_id))
 
     async def test_ticket_messages_status_and_rate_limit(self):
         async with self.sessions() as session:
