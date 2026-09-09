@@ -101,7 +101,16 @@ from app.ui import ORDER_STATUS_LABELS, screen, success, warning
 router = Router()
 settings = get_settings()
 logger = logging.getLogger(__name__)
-BOT_COVER = Path(__file__).resolve().parent / "static" / "brand" / "hero-banner.png"
+BRAND_DIR = Path(__file__).resolve().parent / "static" / "brand"
+SECTION_IMAGES = {
+    "home": BRAND_DIR / "main.png",
+    "catalog": BRAND_DIR / "catalog.png",
+    "orders": BRAND_DIR / "orders.png",
+    "profile": BRAND_DIR / "profile.png",
+    "bonus": BRAND_DIR / "bonus.png",
+    "support": BRAND_DIR / "support.png",
+}
+CAPTION_LIMIT = 1024
 DELIVERY_FEE_RUB = 50
 DELIVERY_FEE_STARS = 25
 PICKUP_ADDRESS = "ТЦ «Гостиный Двор»"
@@ -241,19 +250,57 @@ def menu_text(user: User) -> str:
     )
 
 
+def fit_caption(text: str, limit: int = CAPTION_LIMIT) -> str:
+    """Truncates the caption from the bottom so Telegram always accepts it."""
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+async def send_section(
+    message: Message,
+    section: str,
+    text: str,
+    reply_markup,
+) -> None:
+    """Sends a section screen with its brand image (plain text as fallback)."""
+    image = SECTION_IMAGES.get(section)
+    if image and image.exists():
+        await message.answer_photo(
+            FSInputFile(image),
+            caption=fit_caption(text),
+            reply_markup=reply_markup,
+        )
+    else:
+        await message.answer(text, reply_markup=reply_markup)
+
+
+async def send_or_edit(
+    message: Message,
+    text: str,
+    reply_markup,
+) -> None:
+    """Edits the message in place; a photo message is replaced by plain text."""
+    if message.photo:
+        try:
+            await message.edit_caption(caption=fit_caption(text), reply_markup=reply_markup)
+            return
+        except TelegramAPIError:
+            try:
+                await message.delete()
+            except TelegramAPIError:
+                pass
+            await message.answer(text, reply_markup=reply_markup)
+            return
+    await message.edit_text(text, reply_markup=reply_markup)
+
+
 async def send_home(
     message: Message, state: FSMContext, user: User, viewer_id: int | None = None
 ) -> None:
     await state.clear()
     admin = is_admin(viewer_id if viewer_id is not None else user.telegram_id)
-    if BOT_COVER.exists():
-        await message.answer_photo(
-            FSInputFile(BOT_COVER),
-            caption=menu_text(user),
-            reply_markup=main_keyboard(admin),
-        )
-    else:
-        await message.answer(menu_text(user), reply_markup=main_keyboard(admin))
+    await send_section(message, "home", menu_text(user), main_keyboard(admin))
 
 
 @router.message(CommandStart())
@@ -319,9 +366,9 @@ async def send_catalog(message: Message, *, edit: bool = False) -> None:
             "Загляните немного позже",
         )
     if edit:
-        await message.edit_text(text, reply_markup=catalog_keyboard(products))
+        await send_or_edit(message, text, catalog_keyboard(products))
     else:
-        await message.answer(text, reply_markup=catalog_keyboard(products))
+        await send_section(message, "catalog", text, catalog_keyboard(products))
 
 
 @router.message(F.text.in_({"🛍 Каталог", "Каталог"}))
@@ -343,7 +390,8 @@ async def product_card(callback: CallbackQuery) -> None:
         if not product or not product.is_active:
             await callback.answer("Товар не найден", show_alert=True)
             return
-        await callback.message.edit_text(
+        await send_or_edit(
+            callback.message,
             screen(
                 "◆",
                 html.escape(product.title),
@@ -360,7 +408,7 @@ async def product_card(callback: CallbackQuery) -> None:
                     else "СБП или Telegram Stars"
                 ),
             ),
-            reply_markup=product_keyboard(product),
+            product_keyboard(product),
         )
     await callback.answer()
 
@@ -947,7 +995,9 @@ async def profile(message: Message) -> None:
     async with SessionLocal() as session:
         bonus = await get_bonus_account(session, user.telegram_id)
     username = f"@{html.escape(user.username)}" if user.username else "не указан"
-    await message.answer(
+    await send_section(
+        message,
+        "profile",
         screen(
             "◇",
             "Личный профиль",
@@ -958,7 +1008,7 @@ async def profile(message: Message) -> None:
             f"Зарегистрирован: <b>{user.created_at:%d.%m.%Y}</b>",
             "История покупок хранится в разделе «Мои заказы»",
         ),
-        reply_markup=home_inline_keyboard(),
+        home_inline_keyboard(),
     )
 
 
@@ -973,7 +1023,9 @@ async def send_bonus_screen(message: Message, user_id: int) -> None:
                 .where(BonusAccount.referred_by == user_id)
             )
         ).scalar_one()
-    await message.answer(
+    await send_section(
+        message,
+        "bonus",
         screen(
             "◇",
             "Бонусы",
@@ -984,7 +1036,7 @@ async def send_bonus_screen(message: Message, user_id: int) -> None:
             "За нового участника вы получаете <b>100</b>, ваш друг — <b>50</b>.",
             "Заходите каждый день: серия открывает более крупные награды",
         ),
-        reply_markup=bonus_keyboard(
+        bonus_keyboard(
             daily_claimed=bool(daily["claimed"]),
             next_reward=int(daily["next_reward"]),
         ),
@@ -1161,14 +1213,16 @@ async def my_orders(message: Message) -> None:
     async with SessionLocal() as session:
         orders = await recent_orders(session, message.from_user.id, 10)
     if not orders:
-        await message.answer(
+        await send_section(
+            message,
+            "orders",
             screen(
                 "📦",
                 "Заказов пока нет",
                 "Выберите первый товар в каталоге.",
                 "Ваши покупки появятся здесь",
             ),
-            reply_markup=home_inline_keyboard(),
+            home_inline_keyboard(),
         )
         return
     rows = []
@@ -1183,11 +1237,13 @@ async def my_orders(message: Message) -> None:
             f"{ORDER_STATUS_LABELS.get(order.status, order.status)} · {amount}\n"
             f"🔖 <code>{order.id[:8]}</code>"
         )
-    await message.answer(
+    await send_section(
+        message,
+        "orders",
         screen(
             "📦", "Ваши заказы", "\n\n".join(rows), "Показываем последние 10 заказов"
         ),
-        reply_markup=home_inline_keyboard(),
+        home_inline_keyboard(),
     )
 
 
@@ -1196,7 +1252,9 @@ async def my_orders(message: Message) -> None:
 async def support(message: Message, state: FSMContext) -> None:
     await ensure_user(message)
     await state.set_state(SupportUserForm.content)
-    await message.answer(
+    await send_section(
+        message,
+        "support",
         screen(
             "◇",
             "Поддержка",
@@ -1204,7 +1262,7 @@ async def support(message: Message, state: FSMContext) -> None:
             "Можно приложить фотографию, видео, документ или голосовую запись.",
             "Сообщение получит владелец магазина — ответ придёт в этот чат",
         ),
-        reply_markup=support_cancel_keyboard(),
+        support_cancel_keyboard(),
     )
 
 
