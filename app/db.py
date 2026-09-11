@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     Integer,
@@ -112,6 +113,26 @@ class Order(Base):
     )
     paid_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+    issued_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class Review(Base):
+    """One customer review per order: 1-5 stars plus an optional comment."""
+
+    __tablename__ = "reviews"
+    __table_args__ = (CheckConstraint("rating >= 1 AND rating <= 5"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    order_id: Mapped[str] = mapped_column(String(36), unique=True, index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    title: Mapped[str] = mapped_column(String(255), default="")
+    rating: Mapped[int] = mapped_column(Integer)
+    comment: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
 
 
@@ -311,27 +332,28 @@ async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-        def _add_schedule_columns(sync_conn) -> None:
-            """Lightweight migration for databases created before the feature."""
+        def _apply_light_migrations(sync_conn) -> None:
+            """Lightweight migrations for databases created before a feature."""
             inspector = inspect(sync_conn)
-            columns = {
-                column["name"]
-                for column in inspector.get_columns("order_fulfillments")
+            pending = {
+                "order_fulfillments": {
+                    "scheduled_date": "DATE",
+                    "scheduled_time": "VARCHAR(5)",
+                },
+                "orders": {"issued_at": "DATETIME"},
             }
-            if "scheduled_date" not in columns:
-                sync_conn.execute(
-                    text(
-                        "ALTER TABLE order_fulfillments ADD COLUMN scheduled_date DATE"
-                    )
-                )
-            if "scheduled_time" not in columns:
-                sync_conn.execute(
-                    text(
-                        "ALTER TABLE order_fulfillments ADD COLUMN scheduled_time VARCHAR(5)"
-                    )
-                )
+            existing_tables = set(inspector.get_table_names())
+            for table, columns in pending.items():
+                if table not in existing_tables:
+                    continue
+                present = {column["name"] for column in inspector.get_columns(table)}
+                for name, ddl in columns.items():
+                    if name not in present:
+                        sync_conn.execute(
+                            text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+                        )
 
-        await conn.run_sync(_add_schedule_columns)
+        await conn.run_sync(_apply_light_migrations)
     async with SessionLocal() as session:
         for seed in PRODUCT_SEEDS:
             existing = await session.scalar(
@@ -849,6 +871,145 @@ async def update_order_status(
     return order
 
 
+async def mark_order_issued(
+    session: AsyncSession, order_id: str
+) -> tuple[Order | None, bool]:
+    """Confirms that the order was handed to the customer. Repeat calls are no-ops."""
+    order = await session.get(Order, order_id)
+    if order is None:
+        return None, False
+    if order.status != OrderStatus.PAID.value:
+        return order, False
+    if order.issued_at is not None:
+        return order, False
+    order.issued_at = datetime.now(timezone.utc)
+    await session.commit()
+    return order, True
+
+
+async def revert_order_issuance(session: AsyncSession, order_id: str) -> Order | None:
+    """Moves a paid order back to the 'waiting for handover' list."""
+    order = await session.get(Order, order_id)
+    if order is None:
+        return None
+    order.issued_at = None
+    await session.commit()
+    return order
+
+
+async def cancel_paid_order(
+    session: AsyncSession, order_id: str
+) -> tuple[Order | None, bool]:
+    """Admin-side 'order not completed': cancels a paid order and frees its offer.
+
+    Kept separate from update_order_status so that provider webhooks can never
+    cancel an order that is already paid.
+    """
+    order = await session.get(Order, order_id)
+    if order is None or order.status not in {
+        OrderStatus.CREATED.value,
+        OrderStatus.PROCESSING.value,
+        OrderStatus.PAID.value,
+    }:
+        return order, False
+    order.status = OrderStatus.CANCELED.value
+    order.issued_at = None
+    await session.execute(
+        update(SecretOffer)
+        .where(SecretOffer.order_id == order_id, SecretOffer.status == "reserved")
+        .values(status="active", order_id=None)
+    )
+    await session.commit()
+    return order, True
+
+
+async def get_user(session: AsyncSession, telegram_id: int) -> User | None:
+    return await session.get(User, telegram_id)
+
+
+async def users_by_ids(session: AsyncSession, user_ids: list[int]) -> dict[int, User]:
+    """Loads buyers for an order list in one query."""
+    ids = {user_id for user_id in user_ids if user_id}
+    if not ids:
+        return {}
+    rows = await session.scalars(select(User).where(User.telegram_id.in_(ids)))
+    return {user.telegram_id: user for user in rows}
+
+
+async def paid_orders(
+    session: AsyncSession, *, unissued_only: bool = False, limit: int = 25
+) -> list[Order]:
+    statement = (
+        select(Order)
+        .where(Order.status == OrderStatus.PAID.value)
+        .order_by(Order.paid_at.desc())
+        .limit(limit)
+    )
+    if unissued_only:
+        statement = statement.where(Order.issued_at.is_(None))
+    return list((await session.execute(statement)).scalars())
+
+
+async def pending_issue_count(session: AsyncSession) -> int:
+    return (
+        await session.scalar(
+            select(func.count())
+            .select_from(Order)
+            .where(
+                Order.status == OrderStatus.PAID.value,
+                Order.issued_at.is_(None),
+            )
+        )
+    ) or 0
+
+
+async def create_review(
+    session: AsyncSession,
+    *,
+    order_id: str,
+    user_id: int,
+    title: str,
+    rating: int,
+    comment: str = "",
+) -> Review | None:
+    """Stores the first review for an order; later attempts return None."""
+    existing = await session.scalar(
+        select(Review.id).where(Review.order_id == order_id)
+    )
+    if existing:
+        return None
+    review = Review(
+        order_id=order_id,
+        user_id=user_id,
+        title=title[:255],
+        rating=max(1, min(5, int(rating))),
+        comment=comment.strip()[:1000],
+    )
+    session.add(review)
+    await session.commit()
+    return review
+
+
+async def has_review(session: AsyncSession, order_id: str) -> bool:
+    return bool(
+        await session.scalar(select(Review.id).where(Review.order_id == order_id))
+    )
+
+
+async def reviewed_order_ids(session: AsyncSession, user_id: int) -> set[str]:
+    rows = await session.scalars(
+        select(Review.order_id).where(Review.user_id == user_id)
+    )
+    return set(rows)
+
+
+async def recent_reviews(session: AsyncSession, limit: int = 20) -> list[Review]:
+    rows = await session.scalars(
+        select(Review).order_by(Review.created_at.desc()).limit(limit)
+    )
+    return list(rows)
+
+
 async def record_payment_event(
     session: AsyncSession,
     *,
@@ -995,7 +1156,9 @@ async def delete_product(session: AsyncSession, product_id: int) -> Product | No
     product = await session.get(Product, product_id)
     if product is None:
         return None
-    await session.execute(delete(SecretOffer).where(SecretOffer.product_id == product_id))
+    await session.execute(
+        delete(SecretOffer).where(SecretOffer.product_id == product_id)
+    )
     await session.delete(product)
     await session.commit()
     return product

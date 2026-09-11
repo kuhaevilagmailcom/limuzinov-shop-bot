@@ -20,6 +20,7 @@ from app.db import (
     Base,
     BonusAccount,
     DailyBonusProfile,
+    Order,
     OrderStatus,
     PaymentEvent,
     Product,
@@ -27,9 +28,11 @@ from app.db import (
     SupportStatus,
     add_support_message,
     apply_referral,
+    cancel_paid_order,
     claim_daily_bonus,
     create_order,
     create_promo_code,
+    create_review,
     create_support_ticket,
     daily_bonus_status,
     delete_product,
@@ -37,12 +40,19 @@ from app.db import (
     get_or_create_secret_offer,
     get_order_fulfillment,
     get_shop_analytics,
+    has_review,
     list_support_tickets,
+    mark_order_issued,
     mark_order_paid,
+    paid_orders,
+    pending_issue_count,
+    recent_reviews,
     record_payment_event,
     redeem_promo_code,
     register_user,
     reserve_secret_offer,
+    revert_order_issuance,
+    reviewed_order_ids,
     save_order_fulfillment,
     set_support_ticket_status,
     support_rate_limited,
@@ -51,7 +61,10 @@ from app.db import (
 from app.keyboards import (
     admin_back_keyboard,
     admin_delete_product_keyboard,
+    admin_fail_order_keyboard,
     admin_keyboard,
+    admin_order_keyboard,
+    admin_orders_keyboard,
     admin_product_keyboard,
     bonus_back_keyboard,
     bonus_keyboard,
@@ -59,13 +72,17 @@ from app.keyboards import (
     checkout_keyboard,
     home_inline_keyboard,
     main_keyboard,
+    my_orders_keyboard,
     product_keyboard,
     product_kind_keyboard,
+    review_comment_keyboard,
+    review_rating_keyboard,
     secret_offer_keyboard,
     stars_invoice_keyboard,
     support_cancel_keyboard,
     support_ticket_keyboard,
 )
+from app.notifications import buyer_text
 from app.payments.rollypay import verify_webhook as verify_rolly
 from app.ui import DIVIDER, screen
 from app.web import _same_amount, create_web_app
@@ -253,6 +270,83 @@ class CoreTests(unittest.TestCase):
         self.assertIn("<b>Заголовок</b>", styled)
         self.assertIn("<i>Подсказка</i>", styled)
         self.assertIn(DIVIDER, styled)
+
+    def test_order_admin_controls_and_review_keyboards(self):
+        def actions(keyboard):
+            return {
+                button.callback_data
+                for row in keyboard.inline_keyboard
+                for button in row
+                if button.callback_data
+            }
+
+        waiting = Order(
+            id="11111111-1111",
+            user_id=5,
+            kind="physical",
+            product_key="k",
+            title="Куртка",
+            status="paid",
+            amount_rub=Decimal("100"),
+        )
+        handed = Order(
+            id="11111111-1111",
+            user_id=5,
+            kind="physical",
+            product_key="k",
+            title="Куртка",
+            status="paid",
+            amount_rub=Decimal("100"),
+            issued_at=datetime.now(timezone.utc),
+        )
+        self.assertIn("admin:orders", actions(admin_keyboard()))
+
+        waiting_actions = actions(admin_order_keyboard(waiting))
+        self.assertIn("admin:issue:11111111-1111", waiting_actions)
+        self.assertIn("admin:fail:11111111-1111", waiting_actions)
+        self.assertNotIn("admin:unissue:11111111-1111", waiting_actions)
+
+        handed_actions = actions(admin_order_keyboard(handed))
+        self.assertIn("admin:unissue:11111111-1111", handed_actions)
+        self.assertIn("admin:remind:11111111-1111", handed_actions)
+        self.assertNotIn("admin:issue:11111111-1111", handed_actions)
+        self.assertNotIn(
+            "admin:remind:11111111-1111",
+            actions(admin_order_keyboard(handed, reviewed=True)),
+        )
+
+        self.assertIn(
+            "admin:fail_confirm:11111111-1111",
+            actions(admin_fail_order_keyboard("11111111-1111")),
+        )
+        rating_actions = actions(review_rating_keyboard("o1"))
+        self.assertEqual(
+            {f"review:rate:o1:{stars}" for stars in range(1, 6)},
+            {action for action in rating_actions if action.startswith("review:rate:")},
+        )
+        self.assertIn("review:skip:o1", actions(review_comment_keyboard("o1")))
+        self.assertIn(
+            "admin:orders:all",
+            actions(admin_orders_keyboard([waiting], unissued_only=True)),
+        )
+        self.assertIn(
+            "admin:orders:pending",
+            actions(admin_orders_keyboard([waiting], unissued_only=False)),
+        )
+
+        self.assertEqual(
+            actions(my_orders_keyboard([waiting, handed], {handed.id})), {"home"}
+        )
+        self.assertIn(
+            "review:ask:11111111-1111", actions(my_orders_keyboard([handed], set()))
+        )
+
+    def test_buyer_text_shows_username(self):
+        self.assertEqual(
+            buyer_text("kuhaev", "Артём", 42), "@kuhaev · Артём · <code>42</code>"
+        )
+        self.assertEqual(buyer_text(None, "", 42), "<code>42</code>")
+        self.assertEqual(buyer_text("bad<>", "", 42), "@bad&lt;&gt; · <code>42</code>")
 
     def test_every_main_section_has_back_navigation(self):
         product = Product(
@@ -534,6 +628,90 @@ class SupportDatabaseTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(fulfillment.fee_rub, 50)
             analytics = await get_shop_analytics(session)
             self.assertEqual(analytics["month"]["orders"], 1)
+
+    async def test_issuing_an_order_is_explicit_and_idempotent(self):
+        async with self.sessions() as session:
+            await register_user(session, 920, "issuer", "Получатель")
+            order = await create_order(
+                session,
+                user_id=920,
+                kind="physical",
+                product_key="issue-order",
+                title="Куртка",
+                amount_rub=Decimal("3200.00"),
+            )
+            self.assertEqual(await pending_issue_count(session), 0)
+
+            issued, changed = await mark_order_issued(session, order.id)
+            self.assertFalse(changed)
+            self.assertIsNone(issued.issued_at)
+
+            await mark_order_paid(session, order.id, payment_method="cash")
+            self.assertEqual(await pending_issue_count(session), 1)
+            self.assertEqual(
+                [item.id for item in await paid_orders(session, unissued_only=True)],
+                [order.id],
+            )
+
+            issued, changed = await mark_order_issued(session, order.id)
+            self.assertTrue(changed)
+            self.assertIsNotNone(issued.issued_at)
+            self.assertEqual(await pending_issue_count(session), 0)
+
+            _, repeated = await mark_order_issued(session, order.id)
+            self.assertFalse(repeated)
+
+            reverted = await revert_order_issuance(session, order.id)
+            self.assertIsNone(reverted.issued_at)
+            self.assertEqual(await pending_issue_count(session), 1)
+
+            canceled, changed = await cancel_paid_order(session, order.id)
+            self.assertTrue(changed)
+            self.assertEqual(canceled.status, OrderStatus.CANCELED.value)
+            self.assertIsNone(canceled.issued_at)
+            self.assertEqual(await pending_issue_count(session), 0)
+            _, repeated = await cancel_paid_order(session, order.id)
+            self.assertFalse(repeated)
+
+    async def test_review_is_stored_once_per_order(self):
+        async with self.sessions() as session:
+            await register_user(session, 930, "reviewer", "Отзывщик")
+            order = await create_order(
+                session,
+                user_id=930,
+                kind="physical",
+                product_key="review-order",
+                title="Шапка",
+                amount_rub=Decimal("900.00"),
+            )
+            await mark_order_paid(session, order.id, payment_method="cash")
+
+            review = await create_review(
+                session,
+                order_id=order.id,
+                user_id=930,
+                title=order.title,
+                rating=9,
+                comment="  Топ  ",
+            )
+            self.assertIsNotNone(review)
+            self.assertEqual(review.rating, 5)
+            self.assertEqual(review.comment, "Топ")
+            self.assertTrue(await has_review(session, order.id))
+            self.assertEqual(await reviewed_order_ids(session, 930), {order.id})
+            self.assertEqual(
+                [item.id for item in await recent_reviews(session)], [review.id]
+            )
+
+            self.assertIsNone(
+                await create_review(
+                    session,
+                    order_id=order.id,
+                    user_id=930,
+                    title=order.title,
+                    rating=1,
+                )
+            )
 
     async def test_unique_orders_atomic_payment_and_event_log(self):
         async with self.sessions() as session:

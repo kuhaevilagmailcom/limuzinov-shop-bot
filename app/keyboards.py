@@ -8,7 +8,7 @@ from aiogram.types import (
 )
 
 from app.config import get_settings
-from app.db import Product, PromoCode, SupportStatus, SupportTicket
+from app.db import Order, OrderStatus, Product, PromoCode, SupportStatus, SupportTicket
 
 _TelegramInlineKeyboardMarkup = InlineKeyboardMarkup
 _TelegramReplyKeyboardMarkup = ReplyKeyboardMarkup
@@ -220,6 +220,14 @@ def stars_invoice_keyboard() -> InlineKeyboardMarkup:
 def admin_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Заказы",
+                    callback_data="admin:orders",
+                    icon_custom_emoji_id=NEWS_EMOJI["orders"],
+                    style="success",
+                )
+            ],
             [
                 InlineKeyboardButton(
                     text="Товары",
@@ -591,6 +599,187 @@ def admin_delete_product_keyboard(product_id: int) -> InlineKeyboardMarkup:
                 )
             ],
             [home_button()],
+        ]
+    )
+
+
+def my_orders_keyboard(
+    orders: list[Order], reviewed_ids: set[str]
+) -> InlineKeyboardMarkup:
+    """Offers the review button for handed-over orders that have none yet."""
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=f"Оставить отзыв · {order.id[:8]}",
+                callback_data=f"review:ask:{order.id}",
+                icon_custom_emoji_id=NEWS_EMOJI["stars"],
+            )
+        ]
+        for order in orders
+        if order.status == OrderStatus.PAID.value
+        and order.issued_at
+        and order.id not in reviewed_ids
+    ][:3]
+    rows.append([home_button()])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def admin_order_open_keyboard(order_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Открыть заказ",
+                    callback_data=f"admin:order:{order_id}",
+                    icon_custom_emoji_id=NEWS_EMOJI["orders"],
+                )
+            ],
+            [home_button()],
+        ]
+    )
+
+
+def review_ask_keyboard(order_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="⭐️ Оставить отзыв",
+                    callback_data=f"review:ask:{order_id}",
+                    icon_custom_emoji_id=NEWS_EMOJI["stars"],
+                )
+            ],
+            [home_button()],
+        ]
+    )
+
+
+def admin_orders_keyboard(
+    orders: list[Order], *, unissued_only: bool
+) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=f"{order.id[:8]} · {order.title[:28]}",
+                callback_data=f"admin:order:{order.id}",
+                icon_custom_emoji_id=NEWS_EMOJI["orders"],
+            )
+        ]
+        for order in orders[:20]
+    ]
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="⏳ Ждут выдачи" if not unissued_only else "🔥 Все оплаченные",
+                callback_data=(
+                    "admin:orders:pending" if not unissued_only else "admin:orders:all"
+                ),
+                icon_custom_emoji_id=NEWS_EMOJI["refresh"],
+            )
+        ]
+    )
+    rows.append([home_button()])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def admin_order_keyboard(
+    order: Order, *, reviewed: bool = False
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if order.status == OrderStatus.PAID.value:
+        if order.issued_at is None:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text="Подтвердить выдачу",
+                        callback_data=f"admin:issue:{order.id}",
+                        icon_custom_emoji_id=NEWS_EMOJI["check"],
+                    )
+                ]
+            )
+        else:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text="Вернуть в «ждёт выдачи»",
+                        callback_data=f"admin:unissue:{order.id}",
+                        icon_custom_emoji_id=NEWS_EMOJI["refresh"],
+                    )
+                ]
+            )
+            if not reviewed:
+                rows.append(
+                    [
+                        InlineKeyboardButton(
+                            text="Напомнить об отзыве",
+                            callback_data=f"admin:remind:{order.id}",
+                            icon_custom_emoji_id=NEWS_EMOJI["stars"],
+                        )
+                    ]
+                )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="Заказ не выполнен",
+                    callback_data=f"admin:fail:{order.id}",
+                    icon_custom_emoji_id=NEWS_EMOJI["delete"],
+                )
+            ]
+        )
+    rows.append(
+        [InlineKeyboardButton(text="‹ К заказам", callback_data="admin:orders:pending")]
+    )
+    rows.append([home_button()])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def admin_fail_order_keyboard(order_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Да, отменить заказ",
+                    callback_data=f"admin:fail_confirm:{order_id}",
+                    icon_custom_emoji_id=NEWS_EMOJI["delete"],
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Отмена", callback_data=f"admin:order:{order_id}"
+                )
+            ],
+            [home_button()],
+        ]
+    )
+
+
+def review_rating_keyboard(order_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=str(stars),
+                    callback_data=f"review:rate:{order_id}:{stars}",
+                    icon_custom_emoji_id=NEWS_EMOJI["stars"],
+                )
+                for stars in range(1, 6)
+            ],
+            [home_button("Не сейчас")],
+        ]
+    )
+
+
+def review_comment_keyboard(order_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Пропустить комментарий",
+                    callback_data=f"review:skip:{order_id}",
+                    icon_custom_emoji_id=NEWS_EMOJI["check"],
+                )
+            ],
+            [home_button("Закрыть")],
         ]
     )
 

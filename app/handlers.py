@@ -42,9 +42,11 @@ from app.db import (
     add_support_message,
     all_products,
     apply_referral,
+    cancel_paid_order,
     claim_daily_bonus,
     create_order,
     create_promo_code,
+    create_review,
     create_support_ticket,
     daily_bonus_status,
     delete_product,
@@ -52,11 +54,17 @@ from app.db import (
     get_bonus_account,
     get_or_create_secret_offer,
     get_or_create_user,
+    get_order_fulfillment,
     get_product,
     get_shop_analytics,
+    get_user,
+    has_review,
     list_promo_codes,
     list_support_tickets,
+    mark_order_issued,
     mark_order_paid,
+    paid_orders,
+    pending_issue_count,
     recent_bonus_transactions,
     recent_orders,
     recent_payment_events,
@@ -65,16 +73,22 @@ from app.db import (
     register_user,
     release_secret_offer,
     reserve_secret_offer,
+    revert_order_issuance,
+    reviewed_order_ids,
     save_order_fulfillment,
     set_support_ticket_status,
     support_rate_limited,
     support_ticket_messages,
+    users_by_ids,
 )
 from app.keyboards import (
     admin_back_keyboard,
     admin_cancel_keyboard,
     admin_delete_product_keyboard,
+    admin_fail_order_keyboard,
     admin_keyboard,
+    admin_order_keyboard,
+    admin_orders_keyboard,
     admin_product_keyboard,
     admin_products_keyboard,
     admin_promos_keyboard,
@@ -86,17 +100,30 @@ from app.keyboards import (
     fulfillment_cancel_keyboard,
     home_inline_keyboard,
     main_keyboard,
+    my_orders_keyboard,
     payment_url_keyboard,
     product_keyboard,
     product_kind_keyboard,
     product_price,
+    review_ask_keyboard,
+    review_comment_keyboard,
+    review_rating_keyboard,
     secret_offer_keyboard,
     stars_invoice_keyboard,
     support_cancel_keyboard,
     support_ticket_keyboard,
     support_tickets_keyboard,
 )
-from app.notifications import notify_order_paid
+from app.notifications import (
+    PAYMENT_METHOD_LABELS,
+    buyer_text,
+    notify_order_canceled,
+    notify_order_issued,
+    notify_order_paid,
+    notify_review,
+    order_amount,
+    stars_line,
+)
 from app.payments.rollypay import RollyPayError, create_payment, get_payment
 from app.ui import ORDER_STATUS_LABELS, screen, success, warning
 
@@ -129,6 +156,11 @@ class FulfillmentForm(StatesGroup):
     date = State()
     time = State()
     ready = State()
+
+
+class ReviewForm(StatesGroup):
+    rating = State()
+    comment = State()
 
 
 class AdminAddForm(StatesGroup):
@@ -1507,6 +1539,7 @@ async def my_orders(message: Message) -> None:
     await ensure_user(message)
     async with SessionLocal() as session:
         orders = await recent_orders(session, message.from_user.id, 10)
+        reviewed_ids = await reviewed_order_ids(session, message.from_user.id)
     if not orders:
         await send_section(
             message,
@@ -1527,9 +1560,12 @@ async def my_orders(message: Message) -> None:
             if order.amount_stars
             else f"{money(order.amount_rub or Decimal(0))} ₽"
         )
+        status = ORDER_STATUS_LABELS.get(order.status, order.status)
+        if order.status == OrderStatus.PAID.value:
+            status += " · ✅ выдан" if order.issued_at else " · ждёт выдачи"
         rows.append(
             f"<b>{index}. {html.escape(order.title)}</b>\n"
-            f"{ORDER_STATUS_LABELS.get(order.status, order.status)} · {amount}\n"
+            f"{status} · {amount}\n"
             f"🔖 <code>{order.id[:8]}</code>"
         )
     await send_section(
@@ -1538,7 +1574,7 @@ async def my_orders(message: Message) -> None:
         screen(
             "📦", "Ваши заказы", "\n\n".join(rows), "Показываем последние 10 заказов"
         ),
-        home_inline_keyboard(),
+        my_orders_keyboard(orders, reviewed_ids),
     )
 
 
@@ -1665,6 +1701,7 @@ async def admin_home(target: Message) -> None:
                 .where(SupportTicket.status == SupportStatus.NEW.value)
             )
         ).scalar_one()
+        pending_issue = await pending_issue_count(session)
     text = screen(
         "⚙️",
         "Панель управления",
@@ -1672,6 +1709,7 @@ async def admin_home(target: Message) -> None:
         f"👥 Клиентов: <b>{users_count}</b>\n"
         f"🧾 Заказов: <b>{orders_count}</b>\n"
         f"💳 Оплачено: <b>{paid_count}</b>\n"
+        f"⏳ Ждут выдачи: <b>{pending_issue}</b>\n"
         f"💬 Новых обращений: <b>{support_count}</b>",
         "Выберите раздел",
     )
@@ -1792,6 +1830,305 @@ async def finish_admin_product(
         reply_markup=admin_product_keyboard(product),
     )
     return product
+
+
+def shop_time(value: datetime | None) -> str:
+    """Formats a stored UTC timestamp in the shop's local timezone."""
+    if not value:
+        return "—"
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return f"{value.astimezone(SHOP_TIMEZONE):%d.%m.%Y %H:%M}"
+
+
+def buyer_of(user: User | None, user_id: int) -> str:
+    """Formats the buyer identity line used across admin screens."""
+    return buyer_text(
+        user.username if user else None,
+        user.full_name if user else "",
+        user_id,
+    )
+
+
+async def send_admin_orders(message: Message, *, unissued_only: bool = True) -> None:
+    async with SessionLocal() as session:
+        orders = await paid_orders(session, unissued_only=unissued_only)
+        pending = await pending_issue_count(session)
+        buyers = await users_by_ids(session, [order.user_id for order in orders])
+    if not orders:
+        await message.answer(
+            screen(
+                "📦",
+                "Заказы",
+                "Все оплаченные заказы выданы 🎉"
+                if unissued_only
+                else "Оплаченных заказов пока нет.",
+                f"Ждут выдачи: {pending}",
+            ),
+            reply_markup=admin_orders_keyboard([], unissued_only=unissued_only),
+        )
+        return
+    rows = []
+    for order in orders[:20]:
+        rows.append(
+            f"🔖 <code>{order.id[:8]}</code> · {html.escape(order.title[:40])}\n"
+            f"👤 {buyer_of(buyers.get(order.user_id), order.user_id)}"
+            f" · 💳 {order_amount(order)}"
+            f" · {'✅ выдан' if order.issued_at else '⏳ ждёт выдачи'}"
+        )
+    await message.answer(
+        screen(
+            "📦",
+            "Заказы",
+            "\n\n".join(rows),
+            f"Ждут выдачи: {pending} · откройте заказ кнопкой ниже",
+        ),
+        reply_markup=admin_orders_keyboard(orders, unissued_only=unissued_only),
+    )
+
+
+async def send_admin_order_card(message: Message, order_id: str) -> bool:
+    async with SessionLocal() as session:
+        order = await session.get(Order, order_id)
+        if order is None:
+            return False
+        buyer = await get_user(session, order.user_id)
+        fulfillment = await get_order_fulfillment(session, order.id)
+        reviewed = await has_review(session, order.id)
+    status_line = ORDER_STATUS_LABELS.get(order.status, order.status)
+    if order.status == OrderStatus.PAID.value:
+        status_line += " · ✅ выдан" if order.issued_at else " · ⏳ ждёт выдачи"
+    method = order.payment_method or ""
+    lines = [
+        f"🛍 <b>{html.escape(order.title)}</b>",
+        f"💳 {order_amount(order)} · {PAYMENT_METHOD_LABELS.get(method, method or '—')}",
+        f"📌 {html.escape(status_line)}",
+        f"👤 {buyer_of(buyer, order.user_id)}",
+        f"🔖 <code>{order.id}</code>",
+        f"🕒 Создан: {shop_time(order.created_at)}",
+    ]
+    if order.paid_at:
+        lines.append(f"💰 Оплачен: {shop_time(order.paid_at)}")
+    if order.issued_at:
+        lines.append(f"✅ Выдан: {shop_time(order.issued_at)}")
+    if fulfillment:
+        if fulfillment.method == "delivery":
+            fee = (
+                f"{fulfillment.fee_stars} ⭐"
+                if fulfillment.fee_stars
+                else f"{fulfillment.fee_rub} ₽"
+            )
+            lines.append(f"🚚 Доставка · доплата {fee}")
+            if fulfillment.address:
+                lines.append(f"📍 {html.escape(fulfillment.address)}")
+        elif fulfillment.method == "pickup":
+            lines.append(f"📍 Самовывоз · {PICKUP_ADDRESS}")
+        if fulfillment.scheduled_date:
+            lines.append(
+                f"📅 Дата получения: {fulfillment.scheduled_date:%d.%m.%Y}"
+            )
+        if fulfillment.scheduled_time:
+            lines.append(f"🕒 Время получения: {fulfillment.scheduled_time}")
+    if reviewed:
+        lines.append("⭐️ Отзыв покупателя уже получен")
+    await message.answer(
+        screen(
+            "📦",
+            "Карточка заказа",
+            "\n".join(lines),
+            "Подтвердите выдачу или отмените заказ",
+        ),
+        reply_markup=admin_order_keyboard(order, reviewed=reviewed),
+    )
+    return True
+
+
+async def store_review(
+    message: Message, *, order_id: str, user_id: int, rating: int, comment: str
+) -> None:
+    async with SessionLocal() as session:
+        order = await session.get(Order, order_id)
+        if order is None or order.user_id != user_id:
+            await message.answer(
+                warning("Не получилось", "Заказ не найден."),
+                reply_markup=home_inline_keyboard(),
+            )
+            return
+        review = await create_review(
+            session,
+            order_id=order.id,
+            user_id=order.user_id,
+            title=order.title,
+            rating=rating,
+            comment=comment,
+        )
+    if review is None:
+        await message.answer(
+            warning("Отзыв уже есть", "Вы уже оценили этот заказ — спасибо!"),
+            reply_markup=home_inline_keyboard(),
+        )
+        return
+    await notify_review(message.bot, review)
+    await message.answer(
+        success(
+            "Спасибо за отзыв!",
+            f"{stars_line(review.rating)}\n\nМы всё читаем и станем лучше 🙂",
+        ),
+        reply_markup=home_inline_keyboard(),
+    )
+
+
+async def ask_review_comment(
+    message: Message, state: FSMContext, order_id: str, rating: int
+) -> None:
+    await state.set_state(ReviewForm.comment)
+    await state.update_data(rating=rating)
+    await message.answer(
+        screen(
+            "💬",
+            "Пара слов о заказе",
+            f"{stars_line(rating)}\n\nНапишите, что понравилось или нет — "
+            "<b>это необязательно</b>.",
+            "Можно пропустить кнопкой ниже",
+        ),
+        reply_markup=review_comment_keyboard(order_id),
+    )
+
+
+@router.callback_query(F.data.startswith("review:"))
+async def review_flow(callback: CallbackQuery, state: FSMContext) -> None:
+    action = callback.data.split(":")
+    kind = action[1] if len(action) > 1 else ""
+    order_id = action[2] if len(action) > 2 else ""
+    if kind == "ask":
+        async with SessionLocal() as session:
+            order = await session.get(Order, order_id)
+            reviewed = await has_review(session, order_id) if order else False
+        if order is None or order.user_id != callback.from_user.id:
+            await callback.answer("Заказ не найден", show_alert=True)
+            return
+        if order.status != OrderStatus.PAID.value:
+            await callback.answer("Оценить заказ можно после оплаты", show_alert=True)
+            return
+        if reviewed:
+            await callback.answer("Вы уже оставили отзыв", show_alert=True)
+            return
+        await state.set_state(ReviewForm.rating)
+        await state.update_data(order_id=order.id, title=order.title)
+        await callback.message.answer(
+            screen(
+                "⭐️",
+                "Оценка заказа",
+                f"🛍 <b>{html.escape(order.title)}</b>\n\n"
+                "Как всё прошло? Поставьте от <b>1</b> до <b>5</b> звёзд.",
+                "1 — было плохо, 5 — всё супер",
+            ),
+            reply_markup=review_rating_keyboard(order.id),
+        )
+        await callback.answer()
+        return
+    if kind == "rate":
+        raw_rating = action[3] if len(action) > 3 else ""
+        if not raw_rating.isdigit() or not 1 <= int(raw_rating) <= 5:
+            await callback.answer("Выберите от 1 до 5 звёзд", show_alert=True)
+            return
+        async with SessionLocal() as session:
+            order = await session.get(Order, order_id)
+        if order is None or order.user_id != callback.from_user.id:
+            await callback.answer("Заказ не найден", show_alert=True)
+            return
+        await ask_review_comment(callback.message, state, order.id, int(raw_rating))
+        await callback.answer()
+        return
+    if kind == "skip":
+        data = await state.get_data()
+        await state.clear()
+        rating = int(data.get("rating") or 0)
+        if not 1 <= rating <= 5:
+            await callback.answer("Сначала выберите звёзды", show_alert=True)
+            return
+        await store_review(
+            callback.message,
+            order_id=order_id,
+            user_id=callback.from_user.id,
+            rating=rating,
+            comment="",
+        )
+        return
+    await state.clear()
+    await callback.answer()
+
+
+@router.message(ReviewForm.rating, F.text)
+async def review_rating_from_text(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    order_id = str(data.get("order_id") or "")
+    raw = (message.text or "").strip()
+    if not order_id:
+        await state.clear()
+        await message.answer(
+            warning("Начнём заново", "Откройте «Оставить отзыв» ещё раз."),
+            reply_markup=home_inline_keyboard(),
+        )
+        return
+    if not raw.isdigit() or not 1 <= int(raw) <= 5:
+        await message.answer(
+            warning("Проверьте оценку", "Нужно число от <b>1</b> до <b>5</b>."),
+            reply_markup=review_rating_keyboard(order_id),
+        )
+        return
+    await ask_review_comment(message, state, order_id, int(raw))
+
+
+@router.message(ReviewForm.rating, ~F.text)
+@router.message(ReviewForm.comment, ~F.text)
+async def review_wrong_attachment(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    order_id = str(data.get("order_id") or "")
+    if not order_id:
+        await state.clear()
+        await message.answer(
+            warning("Начнём заново", "Откройте «Оставить отзыв» ещё раз."),
+            reply_markup=home_inline_keyboard(),
+        )
+        return
+    if await state.get_state() == ReviewForm.rating.state:
+        await message.answer(
+            warning(
+                "Нужна оценка",
+                "Отправьте число от <b>1</b> до <b>5</b> или выберите звёзды кнопкой.",
+            ),
+            reply_markup=review_rating_keyboard(order_id),
+        )
+        return
+    await message.answer(
+        warning(
+            "Нужен текст",
+            "Опишите заказ словами или нажмите «Пропустить комментарий».",
+        ),
+        reply_markup=review_comment_keyboard(order_id),
+    )
+
+
+@router.message(ReviewForm.comment, F.text)
+async def review_comment(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    await state.clear()
+    order_id = str(data.get("order_id") or "")
+    rating = int(data.get("rating") or 0)
+    if not order_id or not 1 <= rating <= 5:
+        await message.answer(
+            warning("Начнём заново", "Откройте «Оставить отзыв» ещё раз."),
+            reply_markup=home_inline_keyboard(),
+        )
+        return
+    await store_review(
+        message,
+        order_id=order_id,
+        user_id=message.from_user.id,
+        rating=rating,
+        comment=(message.text or "").strip(),
+    )
 
 
 @router.callback_query(F.data.startswith("admin:"))
@@ -1948,6 +2285,85 @@ async def admin_callbacks(callback: CallbackQuery, state: FSMContext) -> None:
             ),
             reply_markup=admin_products_keyboard(products),
         )
+    elif action[1] == "orders":
+        view = action[2] if len(action) > 2 else ""
+        await send_admin_orders(callback.message, unissued_only=view != "all")
+    elif action[1] == "order" and len(action) > 2:
+        if not await send_admin_order_card(callback.message, action[2]):
+            await callback.answer("Заказ не найден", show_alert=True)
+            return
+    elif action[1] == "issue" and len(action) > 2:
+        async with SessionLocal() as session:
+            order, changed = await mark_order_issued(session, action[2])
+        if order is None:
+            await callback.answer("Заказ не найден", show_alert=True)
+            return
+        if not changed:
+            await callback.answer("Заказ уже выдан или ещё не оплачен", show_alert=True)
+            return
+        await notify_order_issued(callback.bot, order)
+        await send_admin_order_card(callback.message, order.id)
+        await callback.answer("Выдача подтверждена ✅", show_alert=True)
+        return
+    elif action[1] == "unissue" and len(action) > 2:
+        async with SessionLocal() as session:
+            order = await revert_order_issuance(session, action[2])
+        if order is None:
+            await callback.answer("Заказ не найден", show_alert=True)
+            return
+        await send_admin_order_card(callback.message, order.id)
+        await callback.answer("Вернули в очередь выдачи")
+        return
+    elif action[1] == "remind" and len(action) > 2:
+        async with SessionLocal() as session:
+            order = await session.get(Order, action[2])
+        if order is None:
+            await callback.answer("Заказ не найден", show_alert=True)
+            return
+        try:
+            await callback.bot.send_message(
+                order.user_id,
+                screen(
+                    "⭐️",
+                    "Напоминание",
+                    f"Поделитесь впечатлениями о заказе "
+                    f"<b>{html.escape(order.title)}</b> — это займёт 10 секунд.",
+                    "Ваш отзыв помогает другим покупателям",
+                ),
+                reply_markup=review_ask_keyboard(order.id),
+            )
+            await callback.answer("Напомнили покупателю")
+        except Exception:
+            logger.exception("Could not remind %s about review", order.user_id)
+            await callback.answer("Покупатель не получил сообщение", show_alert=True)
+        return
+    elif action[1] == "fail" and len(action) > 2:
+        async with SessionLocal() as session:
+            order = await session.get(Order, action[2])
+        if order is None:
+            await callback.answer("Заказ не найден", show_alert=True)
+            return
+        await callback.message.answer(
+            warning(
+                "Отменить заказ?",
+                f"<b>{html.escape(order.title)}</b> · {order_amount(order)}\n\n"
+                "Заказ получит статус «Отменён», покупатель получит уведомление.",
+            ),
+            reply_markup=admin_fail_order_keyboard(order.id),
+        )
+    elif action[1] == "fail_confirm" and len(action) > 2:
+        async with SessionLocal() as session:
+            order, changed = await cancel_paid_order(session, action[2])
+        if order is None:
+            await callback.answer("Заказ не найден", show_alert=True)
+            return
+        if not changed:
+            await callback.answer("Этот заказ уже нельзя отменить", show_alert=True)
+            return
+        await notify_order_canceled(callback.bot, order)
+        await send_admin_order_card(callback.message, order.id)
+        await callback.answer("Заказ отменён", show_alert=True)
+        return
     elif action[1] == "add":
         await state.set_state(AdminAddForm.title)
         await callback.message.answer(
