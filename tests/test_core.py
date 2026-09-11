@@ -35,11 +35,13 @@ from app.db import (
     create_review,
     create_support_ticket,
     daily_bonus_status,
+    delete_order,
     delete_product,
     get_active_support_ticket,
     get_or_create_secret_offer,
     get_order_fulfillment,
     get_shop_analytics,
+    get_user,
     has_review,
     list_support_tickets,
     mark_order_issued,
@@ -60,6 +62,7 @@ from app.db import (
 )
 from app.keyboards import (
     admin_back_keyboard,
+    admin_delete_order_keyboard,
     admin_delete_product_keyboard,
     admin_fail_order_keyboard,
     admin_keyboard,
@@ -318,6 +321,12 @@ class CoreTests(unittest.TestCase):
         self.assertIn(
             "admin:fail_confirm:11111111-1111",
             actions(admin_fail_order_keyboard("11111111-1111")),
+        )
+        self.assertIn("admin:order_delete:11111111-1111", waiting_actions)
+        self.assertIn("admin:order_delete:11111111-1111", handed_actions)
+        self.assertIn(
+            "admin:order_delete_confirm:11111111-1111",
+            actions(admin_delete_order_keyboard("11111111-1111")),
         )
         rating_actions = actions(review_rating_keyboard("o1"))
         self.assertEqual(
@@ -712,6 +721,61 @@ class SupportDatabaseTests(unittest.IsolatedAsyncioTestCase):
                     rating=1,
                 )
             )
+
+    async def test_order_deletion_keeps_the_payment_journal(self):
+        async with self.sessions() as session:
+            await register_user(session, 940, "ghost", "Покупатель")
+            order = await create_order(
+                session,
+                user_id=940,
+                kind="physical",
+                product_key="del-order",
+                title="Палка",
+                amount_rub=Decimal("700.00"),
+            )
+            await save_order_fulfillment(
+                session,
+                order_id=order.id,
+                method="pickup",
+                address="ТЦ «Гостиный Двор»",
+                scheduled_date=date(2026, 9, 20),
+                scheduled_time="12:00",
+            )
+            await mark_order_paid(session, order.id, payment_method="cash")
+            await create_review(
+                session,
+                order_id=order.id,
+                user_id=940,
+                title=order.title,
+                rating=4,
+                comment="норм",
+            )
+            await record_payment_event(
+                session,
+                event_key="del-order-paid",
+                provider="cash",
+                order_id=order.id,
+                event_status="paid",
+                result="accepted",
+                amount=Decimal("700.00"),
+                currency="RUB",
+            )
+            self.assertEqual((await get_user(session, 940)).purchases_count, 1)
+
+            deleted = await delete_order(session, order.id)
+
+            self.assertIsNotNone(deleted)
+            self.assertIsNone(await session.get(Order, order.id))
+            self.assertIsNone(await get_order_fulfillment(session, order.id))
+            self.assertFalse(await has_review(session, order.id))
+            self.assertEqual(await pending_issue_count(session), 0)
+            self.assertEqual((await get_user(session, 940)).purchases_count, 0)
+            event = await session.scalar(
+                select(PaymentEvent).where(PaymentEvent.event_key == "del-order-paid")
+            )
+            self.assertIsNotNone(event)
+            self.assertIsNone(event.order_id)
+            self.assertIsNone(await delete_order(session, order.id))
 
     async def test_unique_orders_atomic_payment_and_event_log(self):
         async with self.sessions() as session:

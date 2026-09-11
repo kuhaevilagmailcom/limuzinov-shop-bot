@@ -923,6 +923,50 @@ async def cancel_paid_order(
     return order, True
 
 
+async def delete_order(session: AsyncSession, order_id: str) -> Order | None:
+    """Permanently removes an order with its fulfillment and review.
+
+    The payment journal (``payment_events``) is kept for auditing and only
+    detached from the order, and ``payment_receipts`` stay untouched so a
+    replayed provider webhook can never be attached to a different order.
+    """
+    order = await session.get(Order, order_id)
+    if order is None:
+        return None
+    was_paid = order.status == OrderStatus.PAID.value
+    await session.execute(
+        delete(OrderFulfillment).where(OrderFulfillment.order_id == order_id)
+    )
+    await session.execute(delete(Review).where(Review.order_id == order_id))
+    await session.execute(
+        update(SecretOffer)
+        .where(SecretOffer.order_id == order_id, SecretOffer.status == "reserved")
+        .values(status="active", order_id=None)
+    )
+    await session.execute(
+        update(SecretOffer)
+        .where(SecretOffer.order_id == order_id, SecretOffer.status != "reserved")
+        .values(order_id=None)
+    )
+    await session.execute(
+        update(PaymentEvent)
+        .where(PaymentEvent.order_id == order_id)
+        .values(order_id=None)
+    )
+    if was_paid:
+        await session.execute(
+            update(User)
+            .where(
+                User.telegram_id == order.user_id,
+                User.purchases_count > 0,
+            )
+            .values(purchases_count=User.purchases_count - 1)
+        )
+    await session.delete(order)
+    await session.commit()
+    return order
+
+
 async def get_user(session: AsyncSession, telegram_id: int) -> User | None:
     return await session.get(User, telegram_id)
 

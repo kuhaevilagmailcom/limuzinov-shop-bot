@@ -727,10 +727,39 @@ def admin_order_keyboard(
             ]
         )
     rows.append(
+        [
+            InlineKeyboardButton(
+                text="Удалить заказ",
+                callback_data=f"admin:order_delete:{order.id}",
+                icon_custom_emoji_id=NEWS_EMOJI["delete"],
+            )
+        ]
+    )
+    rows.append(
         [InlineKeyboardButton(text="‹ К заказам", callback_data="admin:orders:pending")]
     )
     rows.append([home_button()])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def admin_delete_order_keyboard(order_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Да, удалить навсегда",
+                    callback_data=f"admin:order_delete_confirm:{order_id}",
+                    icon_custom_emoji_id=NEWS_EMOJI["delete"],
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Отмена", callback_data=f"admin:order:{order_id}"
+                )
+            ],
+            [home_button()],
+        ]
+    )
 
 
 def admin_fail_order_keyboard(order_id: str) -> InlineKeyboardMarkup:

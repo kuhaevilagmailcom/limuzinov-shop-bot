@@ -49,6 +49,7 @@ from app.db import (
     create_review,
     create_support_ticket,
     daily_bonus_status,
+    delete_order,
     delete_product,
     get_active_support_ticket,
     get_bonus_account,
@@ -85,6 +86,7 @@ from app.keyboards import (
     admin_back_keyboard,
     admin_cancel_keyboard,
     admin_delete_product_keyboard,
+    admin_delete_order_keyboard,
     admin_fail_order_keyboard,
     admin_keyboard,
     admin_order_keyboard,
@@ -2363,6 +2365,41 @@ async def admin_callbacks(callback: CallbackQuery, state: FSMContext) -> None:
         await notify_order_canceled(callback.bot, order)
         await send_admin_order_card(callback.message, order.id)
         await callback.answer("Заказ отменён", show_alert=True)
+        return
+    elif action[1] == "order_delete" and len(action) > 2:
+        async with SessionLocal() as session:
+            order = await session.get(Order, action[2])
+            buyer = await get_user(session, order.user_id) if order else None
+        if order is None:
+            await callback.answer("Заказ не найден", show_alert=True)
+            return
+        await callback.message.answer(
+            warning(
+                "Удалить заказ навсегда?",
+                f"<b>{html.escape(order.title)}</b> · {order_amount(order)}\n"
+                f"👤 {buyer_of(buyer, order.user_id)}\n"
+                f"🔖 <code>{order.id}</code>\n\n"
+                "Заказ, его адрес, график получения и отзыв удалятся из базы. "
+                "Журнал платежей сохранится, а аналитика пересчитается.",
+            ),
+            reply_markup=admin_delete_order_keyboard(order.id),
+        )
+    elif action[1] == "order_delete_confirm" and len(action) > 2:
+        async with SessionLocal() as session:
+            order = await delete_order(session, action[2])
+            orders = await paid_orders(session, unissued_only=True)
+        if order is None:
+            await callback.answer("Заказ уже удалён", show_alert=True)
+            return
+        await callback.message.answer(
+            success(
+                "Заказ удалён",
+                f"<b>{html.escape(order.title)}</b> · "
+                f"🔖 <code>{order.id[:8]}</code> удалён из базы.",
+            ),
+            reply_markup=admin_orders_keyboard(orders, unissued_only=True),
+        )
+        await callback.answer("Заказ удалён", show_alert=True)
         return
     elif action[1] == "add":
         await state.set_state(AdminAddForm.title)
