@@ -80,7 +80,7 @@ def channel_id() -> str | int | None:
     return int(value) if value.lstrip("-").isdigit() else value
 
 
-def buttons(sub_id: int, *, premium: bool = True, with_info: bool = False) -> InlineKeyboardMarkup:
+def buttons(sub_id: int, *, premium: bool = True) -> InlineKeyboardMarkup:
     def button(label: str, action: str, role: str, style: str) -> InlineKeyboardButton:
         kwargs = {"text": label, "callback_data": f"mod:{action}:{sub_id}"}
         if premium:
@@ -91,41 +91,10 @@ def buttons(sub_id: int, *, premium: bool = True, with_info: bool = False) -> In
             kwargs["text"] = f"{ALT[role]} {label}"
         return InlineKeyboardButton(**kwargs)
 
-    rows = [[
+    return InlineKeyboardMarkup(inline_keyboard=[[
         button("Принять", "yes", "ok", "success"),
         button("Отклонить", "no", "reject", "danger"),
-    ]]
-    if with_info:
-        rows.append([InlineKeyboardButton(text="Данные отправителя", callback_data=f"mod:info:{sub_id}")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def status_button(sub_id: int, status: str) -> InlineKeyboardMarkup:
-    label = "✅ Опубликовано" if status == "published" else "❌ Отклонено"
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text=label, callback_data=f"mod:done:{sub_id}")
     ]])
-
-
-CAPTION_TYPES = {"photo", "video", "animation", "audio", "document", "voice"}
-
-
-def admin_text(sub, item, *, caption: bool, status: str = "pending",
-               premium: bool = True) -> str:
-    """Original caption/text + metadata in ONE Telegram message."""
-    details = card_text(sub, status=status, premium=premium)
-    original = item["source_text"] if item is not None else None
-    if not original:
-        return details
-    # Telegram: 1024 caption / 4096 message characters, excluding formatting tags.
-    visible_details = html.unescape(re.sub(r"<[^>]*>", "", details))
-    budget = max(0, (1024 if caption else 4096) - len(visible_details) - 4)
-    preview = original[:budget]
-    if len(original) > len(preview) and preview:
-        preview = preview[:-1] + "…"
-    if not preview:
-        return details
-    return f"{html.escape(preview)}\n\n{details}"
 
 
 def sent_at(utc_value: str) -> str:
@@ -179,97 +148,21 @@ async def copy_submission(bot: Bot, destination: int | str, sub_id: int) -> None
             raise ValueError("Partial album copy; review destination before retry")
 
 
-async def deliver_admin_message(bot: Bot, sub_id: int) -> tuple[int, str]:
-    """Send exactly one moderated message for an individual media item.
-
-    For an album, Telegram necessarily returns multiple grouped media messages.
-    Its first media message holds the single moderation caption + buttons.
-    """
-    sub = db.get(sub_id)
-    item = db.first_item(sub_id)
-    ids = db.message_ids(sub_id)
-    if sub is None or item is None or not ids:
-        raise ValueError("Submission missing")
-
-    if len(ids) == 1:
-        if item["source_kind"] == "text":
-            for premium in (True, False):
-                try:
-                    msg = await bot.send_message(
-                        ADMIN_ID, admin_text(sub, item, caption=False, premium=premium),
-                        reply_markup=buttons(sub_id, premium=premium),
-                    )
-                    return msg.message_id, "text"
-                except TelegramBadRequest:
-                    if not premium:
-                        raise
-        elif item["source_kind"] in CAPTION_TYPES:
-            for premium in (True, False):
-                try:
-                    sent = await bot.copy_message(
-                        chat_id=ADMIN_ID, from_chat_id=sub["user_id"],
-                        message_id=ids[0],
-                        caption=admin_text(sub, item, caption=True, premium=premium),
-                        parse_mode="HTML",
-                        reply_markup=buttons(sub_id, premium=premium),
-                    )
-                    return sent.message_id, "caption"
-                except TelegramBadRequest:
-                    if not premium:
-                        raise
-        else:
-            # Telegram does not allow a caption on video notes or stickers.
-            # Keep the circular video/sticker intact with buttons under it.
-            for premium in (True, False):
-                try:
-                    sent = await bot.copy_message(
-                        chat_id=ADMIN_ID, from_chat_id=sub["user_id"],
-                        message_id=ids[0],
-                        reply_markup=buttons(sub_id, premium=premium, with_info=True),
-                    )
-                    return sent.message_id, "bare"
-                except TelegramBadRequest:
-                    if not premium:
-                        raise
-
-    sent = await bot.copy_messages(
-        chat_id=ADMIN_ID, from_chat_id=sub["user_id"], message_ids=ids,
-    )
-    if len(sent) != len(ids):
-        raise ValueError("Album was only partially copied; check admin chat")
-    card_id = sent[0].message_id
-    # No extra text message after the album. Put the caption and controls
-    # directly under its first media item.
-    for premium in (True, False):
-        try:
-            await bot.edit_message_caption(
-                chat_id=ADMIN_ID, message_id=card_id,
-                caption=admin_text(sub, item, caption=True, premium=premium),
-                reply_markup=buttons(sub_id, premium=premium),
-            )
-            return card_id, "caption"
-        except TelegramBadRequest:
-            if premium:
-                continue
-    # If album's first item cannot hold a caption, keep moderation usable.
-    await bot.edit_message_reply_markup(
-        chat_id=ADMIN_ID, message_id=card_id,
-        reply_markup=buttons(sub_id, premium=False, with_info=True),
-    )
-    return card_id, "bare"
-
-
 async def send_to_admin(bot: Bot, sub_id: int) -> None:
     if not db.move(sub_id, "collecting", "notifying"):
         return
     sub = db.get(sub_id)
     try:
-        card_id, kind = await deliver_admin_message(bot, sub_id)
-        db.set_card_pending(sub_id, card_id, kind)
+        await copy_submission(bot, ADMIN_ID, sub_id)
+        try:
+            card = await bot.send_message(ADMIN_ID, card_text(sub), reply_markup=buttons(sub_id))
+        except TelegramBadRequest:
+            card = await bot.send_message(ADMIN_ID, card_text(sub, premium=False), reply_markup=buttons(sub_id, premium=False))
+        db.set_card_pending(sub_id, card.message_id)
     except (TelegramAPIError, ValueError) as exc:
         logger.exception("Admin delivery failed for %s: %s", sub_id, exc)
         db.move(sub_id, "notifying", "delivery_failed")
-        await safe_notify(bot, sub["user_id"], "Не удалось передать предложение. Попробуйте позже.")
+        await safe_notify(bot, sub["user_id"], "Не удалось передать предложение на проверку. Попробуйте позже.")
         return
     await safe_notify(bot, sub["user_id"], f"{glyph('ok')} Предложение отправлено на проверку.")
 
@@ -380,9 +273,7 @@ async def inbox(message: Message, bot: Bot) -> None:
                                full_name=message.from_user.full_name,
                                username=message.from_user.username,
                                message_id=message.message_id,
-                               album_key=message.media_group_id,
-                               source_kind="text" if message.text is not None else str(message.content_type),
-                               source_text=message.text if message.text is not None else message.caption)
+                               album_key=message.media_group_id)
     except ValueError:
         await message.answer("Альбом был уже отправлен. Повтори отправку, пожалуйста.")
         return
@@ -410,16 +301,6 @@ async def moderate(callback: CallbackQuery, bot: Bot) -> None:
     sub = db.get(sub_id)
     if not sub:
         await callback.answer("Заявка не найдена.", show_alert=True)
-        return
-    if action == "info":
-        username = ("@" + sub["username"]) if sub["username"] else "без username"
-        await callback.answer(
-            f"Отправитель: {username}\nID: {sub['user_id']}\nИмя: {sub['full_name']}\nДата: {sent_at(sub['created_at'])}",
-            show_alert=True,
-        )
-        return
-    if action == "done":
-        await callback.answer("Уже обработано.")
         return
     if sub["status"] != "pending":
         await callback.answer("Уже обработано.")
@@ -450,44 +331,18 @@ async def moderate(callback: CallbackQuery, bot: Bot) -> None:
     else:
         await callback.answer("Неизвестное действие.", show_alert=True)
         return
-    card_id = sub["admin_card_id"]
-    if card_id:
-        sub = db.get(sub_id)
-        item = db.first_item(sub_id)
-        edited = False
-        if sub["admin_kind"] in ("text", "caption"):
-            for premium in (True, False):
-                try:
-                    content = admin_text(
-                        sub, item, caption=sub["admin_kind"] == "caption",
-                        status=new_status, premium=premium,
-                    )
-                    if sub["admin_kind"] == "caption":
-                        await bot.edit_message_caption(
-                            chat_id=ADMIN_ID, message_id=card_id,
-                            caption=content, reply_markup=None,
-                        )
-                    else:
-                        await bot.edit_message_text(
-                            chat_id=ADMIN_ID, message_id=card_id,
-                            text=content, reply_markup=None,
-                        )
-                    edited = True
-                    break
-                except TelegramBadRequest:
-                    continue
-                except TelegramAPIError as exc:
-                    logger.warning("Failed to update moderation message %s: %s", sub_id, exc)
-                    break
-        if not edited:
-            try:
-                await bot.edit_message_reply_markup(
-                    chat_id=ADMIN_ID, message_id=card_id,
-                    reply_markup=status_button(sub_id, new_status),
-                )
-            except TelegramAPIError as exc:
-                logger.warning("Failed to update moderation buttons %s: %s", sub_id, exc)
-
+    try:
+        if sub["admin_card_id"]:
+            await bot.edit_message_text(chat_id=ADMIN_ID, message_id=sub["admin_card_id"],
+                                        text=card_text(sub, new_status), reply_markup=None)
+    except TelegramBadRequest:
+        try:
+            await bot.edit_message_text(chat_id=ADMIN_ID, message_id=sub["admin_card_id"],
+                                        text=card_text(sub, new_status, premium=False), reply_markup=None)
+        except TelegramAPIError as exc:
+            logger.warning("Could not update admin card %s: %s", sub_id, exc)
+    except TelegramAPIError as exc:
+        logger.warning("Could not update admin card %s: %s", sub_id, exc)
     await callback.answer(toast)
     await safe_notify(bot, sub["user_id"], notice)
 

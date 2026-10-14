@@ -21,7 +21,6 @@ class Storage:
                 album_key TEXT,
                 status TEXT NOT NULL DEFAULT 'collecting',
                 admin_card_id INTEGER,
-                admin_kind TEXT NOT NULL DEFAULT 'bare',
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 UNIQUE(user_id, album_key)
             );
@@ -29,8 +28,6 @@ class Storage:
                 submission_id INTEGER NOT NULL REFERENCES submissions(id),
                 user_id INTEGER NOT NULL,
                 message_id INTEGER NOT NULL,
-                source_kind TEXT NOT NULL DEFAULT 'unknown',
-                source_text TEXT,
                 PRIMARY KEY (user_id, message_id)
             );
             CREATE INDEX IF NOT EXISTS items_sub_id_idx ON items(submission_id);
@@ -40,19 +37,9 @@ class Storage:
                 value TEXT NOT NULL
             );
         """)
-        # Keep earlier submissions available when updating a running bot.
-        for table, name, definition in (
-            ("submissions", "admin_kind", "TEXT NOT NULL DEFAULT 'bare'"),
-            ("items", "source_kind", "TEXT NOT NULL DEFAULT 'unknown'"),
-            ("items", "source_text", "TEXT"),
-        ):
-            columns = {row["name"] for row in self.conn.execute(f"PRAGMA table_info({table})")}
-            if name not in columns:
-                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
 
     def add(self, *, user_id: int, full_name: str, username: str | None,
-            message_id: int, album_key: str | None,
-            source_kind: str = "unknown", source_text: str | None = None) -> tuple[int, bool]:
+            message_id: int, album_key: str | None) -> tuple[int, bool]:
         """Add a message, returning (submission id, newly created submission).
 
         For albums, multiple Telegram updates share one submission.
@@ -87,8 +74,8 @@ class Storage:
                 )
                 submission_id, new = cur.lastrowid, True
             self.conn.execute(
-                "INSERT INTO items(submission_id,user_id,message_id,source_kind,source_text) VALUES (?,?,?,?,?)",
-                (submission_id, user_id, message_id, source_kind, source_text),
+                "INSERT INTO items(submission_id,user_id,message_id) VALUES (?,?,?)",
+                (submission_id, user_id, message_id),
             )
             return int(submission_id), new
 
@@ -101,12 +88,6 @@ class Storage:
             (submission_id,),
         )]
 
-    def first_item(self, submission_id: int) -> sqlite3.Row | None:
-        return self.conn.execute(
-            "SELECT * FROM items WHERE submission_id=? ORDER BY message_id LIMIT 1",
-            (submission_id,),
-        ).fetchone()
-
     def move(self, submission_id: int, from_status: str, to_status: str) -> bool:
         with self.conn:
             cur = self.conn.execute(
@@ -115,11 +96,11 @@ class Storage:
             )
             return cur.rowcount == 1
 
-    def set_card_pending(self, submission_id: int, card_id: int, kind: str = "bare") -> None:
+    def set_card_pending(self, submission_id: int, card_id: int) -> None:
         with self.conn:
             self.conn.execute(
-                "UPDATE submissions SET admin_card_id=?, admin_kind=?, status='pending' WHERE id=? AND status='notifying'",
-                (card_id, kind, submission_id),
+                "UPDATE submissions SET admin_card_id=?, status='pending' WHERE id=? AND status='notifying'",
+                (card_id, submission_id),
             )
 
     def get_setting(self, key: str) -> str | None:
