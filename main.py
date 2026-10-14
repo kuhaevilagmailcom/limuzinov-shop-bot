@@ -225,9 +225,8 @@ async def start(message: Message, bot: Bot) -> None:
     if message.from_user and message.from_user.id == ADMIN_ID:
         await ensure_admin_commands(bot)
     await message.answer(
-        "<b>Предложка колледжа</b>\n\n"
-        "Отправь сюда текст, фото, видео, кружок, голосовое или другой файл.\n\n"
-        "Сообщение поступит на проверку администратору."
+        "<b>Предложка</b>\n\n"
+        "Отправь сюда текст, фото, видео, кружок, голосовое или файл."
     )
 
 
