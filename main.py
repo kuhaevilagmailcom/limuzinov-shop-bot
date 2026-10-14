@@ -14,7 +14,10 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import Command, CommandStart
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (BotCommand, BotCommandScopeDefault, BotCommandScopeAllPrivateChats,
+                           BotCommandScopeAllGroupChats, BotCommandScopeAllChatAdministrators,
+                           BotCommandScopeChat, CallbackQuery, InlineKeyboardButton,
+                           InlineKeyboardMarkup, MenuButtonCommands, Message)
 from dotenv import load_dotenv
 
 from storage import Storage
@@ -24,7 +27,7 @@ load_dotenv(ROOT / ".env")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_ID = int(os.getenv("ADMIN_ID", "6341678542"))
 DB_PATH = os.getenv("DB_PATH", str(ROOT / "suggestions.sqlite3"))
-DEFAULT_CHANNEL_ID = os.getenv("CHANNEL_ID", "").strip()
+DEFAULT_CHANNEL_ID = os.getenv("CHANNEL_ID", "-1004422721133").strip() or "-1004422721133"
 STICKER_PACK = os.getenv("EMOJI_PACK", "vector_icons_by_fStikBot").strip()
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Yekaterinburg")
 CONFIRM_EMOJI_ID = "5219899949281453881"
@@ -173,18 +176,59 @@ async def finish_album(bot: Bot, sub_id: int, key: tuple[int, str]) -> None:
             album_jobs.pop(key, None)
 
 
+async def configure_commands(bot: Bot) -> None:
+    """Clear commands left in Telegram by the previous shop bot.
+
+    Commands are stored on Telegram's servers independently of source code.
+    Old scope/language entries can override a freshly configured default list.
+    """
+    scopes = (
+        BotCommandScopeDefault(),
+        BotCommandScopeAllPrivateChats(),
+        BotCommandScopeAllGroupChats(),
+        BotCommandScopeAllChatAdministrators(),
+        BotCommandScopeChat(chat_id=ADMIN_ID),
+    )
+    for scope in scopes:
+        for lang in ("", "ru", "en"):
+            try:
+                await bot.delete_my_commands(scope=scope, language_code=lang)
+            except TelegramAPIError as exc:
+                logger.warning("Failed to clear previous bot commands (%s, %s): %s", type(scope).__name__, lang, exc)
+
+    user_commands = [BotCommand(command="start", description="Предложить сообщение")]
+    await bot.set_my_commands(user_commands, scope=BotCommandScopeDefault())
+    await bot.set_my_commands(user_commands, scope=BotCommandScopeAllPrivateChats())
+    try:
+        await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+    except TelegramAPIError as exc:
+        logger.warning("Could not reset old bot menu button: %s", exc)
+    await ensure_admin_commands(bot)
+
+
+async def ensure_admin_commands(bot: Bot) -> None:
+    """Admin's private-chat menu includes /channel; public users see /start only."""
+    admin_commands = [
+        BotCommand(command="start", description="Предложить сообщение"),
+        BotCommand(command="channel", description="Канал для публикаций"),
+    ]
+    try:
+        await bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=ADMIN_ID))
+        await bot.set_chat_menu_button(chat_id=ADMIN_ID, menu_button=MenuButtonCommands())
+    except TelegramAPIError as exc:
+        # Chat-specific configuration becomes possible once admin presses /start.
+        logger.warning("Cannot set admin chat command menu yet: %s", exc)
+
+
 @router.message(CommandStart(), F.chat.type == "private")
-async def start(message: Message) -> None:
+async def start(message: Message, bot: Bot) -> None:
+    if message.from_user and message.from_user.id == ADMIN_ID:
+        await ensure_admin_commands(bot)
     await message.answer(
         "<b>Предложка колледжа</b>\n\n"
         "Отправь сюда текст, фото, видео, кружок, голосовое или другой файл.\n\n"
         "Сообщение поступит на проверку администратору."
     )
-
-
-@router.message(Command("help"), F.chat.type == "private")
-async def help_cmd(message: Message) -> None:
-    await start(message)
 
 
 @router.message(Command("channel"), F.chat.type == "private")
@@ -213,28 +257,6 @@ async def set_channel(message: Message, bot: Bot) -> None:
         return
     db.set_setting("channel_id", str(ch.id))
     await message.answer(f"{glyph('ok')} Канал подключён: <b>{html.escape(ch.title or str(ch.id))}</b>.")
-
-
-@router.message(Command("status"), F.chat.type == "private")
-async def status(message: Message) -> None:
-    if not message.from_user or message.from_user.id != ADMIN_ID:
-        return
-    await message.answer(
-        f"<b>Модерация</b>\n━━━━━━━━━━━━━━\nНа проверке: <b>{db.count_pending()}</b>\n"
-        f"Канал: <code>{html.escape(str(channel_id() or 'не подключён'))}</code>\n\n"
-        "Настройка: /channel"
-    )
-
-
-@router.message(Command("retry"), F.chat.type == "private")
-async def retry(message: Message, bot: Bot) -> None:
-    if not message.from_user or message.from_user.id != ADMIN_ID:
-        return
-    ids = db.failed_ids()
-    for sub_id in ids:
-        if db.move(sub_id, "delivery_failed", "collecting"):
-            await send_to_admin(bot, sub_id)
-    await message.answer(f"Обработано заявок для повторной доставки: {len(ids)}")
 
 
 @router.message(F.chat.type == "private")
@@ -298,7 +320,7 @@ async def moderate(callback: CallbackQuery, bot: Bot) -> None:
             # Never silently retry an ambiguous partial publish; avoid duplicates.
             db.move(sub_id, "publishing", "publish_uncertain")
             logger.exception("Publish status uncertain for %s: %s", sub_id, exc)
-            await callback.answer("Ошибка публикации. Проверь канал вручную. /status", show_alert=True)
+            await callback.answer("Ошибка публикации. Проверь канал вручную.", show_alert=True)
             return
         db.move(sub_id, "publishing", "published")
         new_status, notice, toast = "published", "✅ Твоё предложение опубликовано!", "Опубликовано"
@@ -345,6 +367,7 @@ async def main() -> None:
     dp.include_router(router)
     try:
         await bot.delete_webhook(drop_pending_updates=False)
+        await configure_commands(bot)
         await load_pack(bot)
         recovery_job = asyncio.create_task(recover(bot))
         logger.info("Started. Admin %s; channel %s", ADMIN_ID, channel_id())
