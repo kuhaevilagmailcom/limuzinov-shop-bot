@@ -23,6 +23,8 @@ class Storage:
                 admin_card_id INTEGER,
                 quote_text TEXT NOT NULL DEFAULT '',
                 keyboard_cleaned INTEGER NOT NULL DEFAULT 0,
+                reviewed_by_id INTEGER,
+                reviewed_by_name TEXT,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 UNIQUE(user_id, album_key)
             );
@@ -58,6 +60,10 @@ class Storage:
             self.conn.execute(
                 "ALTER TABLE submissions ADD COLUMN keyboard_cleaned INTEGER NOT NULL DEFAULT 0"
             )
+        if "reviewed_by_id" not in columns:
+            self.conn.execute("ALTER TABLE submissions ADD COLUMN reviewed_by_id INTEGER")
+        if "reviewed_by_name" not in columns:
+            self.conn.execute("ALTER TABLE submissions ADD COLUMN reviewed_by_name TEXT")
 
         item_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(items)")}
         if "content_type" not in item_columns:
@@ -156,12 +162,27 @@ class Storage:
             )
         )
 
-    def move(self, submission_id: int, from_status: str, to_status: str) -> bool:
+    def move(
+        self,
+        submission_id: int,
+        from_status: str,
+        to_status: str,
+        *,
+        reviewed_by_id: int | None = None,
+        reviewed_by_name: str | None = None,
+    ) -> bool:
         with self.conn:
-            cur = self.conn.execute(
-                "UPDATE submissions SET status=? WHERE id=? AND status=?",
-                (to_status, submission_id, from_status),
-            )
+            if reviewed_by_id is None and reviewed_by_name is None:
+                cur = self.conn.execute(
+                    "UPDATE submissions SET status=? WHERE id=? AND status=?",
+                    (to_status, submission_id, from_status),
+                )
+            else:
+                cur = self.conn.execute(
+                    "UPDATE submissions SET status=?, reviewed_by_id=?, reviewed_by_name=? "
+                    "WHERE id=? AND status=?",
+                    (to_status, reviewed_by_id, reviewed_by_name, submission_id, from_status),
+                )
             return cur.rowcount == 1
 
     def set_card_pending(self, submission_id: int, card_id: int) -> None:
