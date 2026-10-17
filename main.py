@@ -185,10 +185,6 @@ async def inbox(message: Message, bot: Bot) -> None:
     if not message.from_user:
         return
 
-    if message.text and message.text.startswith("/"):
-        await message.answer("Отправь текст или медиа без команды.")
-        return
-
     if message.content_type in {
         "new_chat_members",
         "left_chat_member",
