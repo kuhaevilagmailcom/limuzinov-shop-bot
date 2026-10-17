@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 import logging
 import os
 from datetime import datetime, timezone
@@ -25,6 +26,7 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     MenuButtonCommands,
     Message,
+    MessageEntity,
     ReplyParameters,
 )
 from dotenv import load_dotenv
@@ -46,13 +48,6 @@ DEFAULT_CHAT_ID = (
     REQUESTED_DEFAULT_CHAT_ID
     if not DESTINATION_ENV or DESTINATION_ENV in LEGACY_DEFAULT_CHAT_IDS
     else DESTINATION_ENV
-)
-CHANNEL_DISCLAIMER = (
-    "This channel fully complies with all platform rules and community guidelines. "
-    "Content is intended for legal and acceptable use only.\n\n"
-    "Attention: We strictly comply with laws and ethical standards. "
-    "All information is provided solely for research and educational purposes. "
-    "We do not encourage or carry out unauthorized collection or dissemination of personal data."
 )
 TIMEZONE = os.getenv("TIMEZONE", "Europe/Riga")
 ALBUM_DELAY = 2.0
@@ -152,25 +147,65 @@ def sent_at(utc_value: str) -> str:
     return dt.astimezone(tz).strftime("%d.%m.%Y %H:%M")
 
 
-def card_text(sub, status: str = "pending") -> str:
-    name = html.escape(sub["full_name"] or "Не указано")
-    username = ("@" + html.escape(sub["username"])) if sub["username"] else "Без username"
-    header = "🆕 <b>Новая заявка</b>" if status == "pending" else "<b>Заявка обработана</b>"
-    text = (
-        f"{header}\n━━━━━━━━━━━━━━\n"
-        f"👤 <b>Отправитель:</b> {username}\n"
-        f"🪪 <b>ID:</b> <code>{sub['user_id']}</code>\n"
-        f"📝 <b>Имя:</b> {name}\n"
-        f"🕓 <b>Отправлено:</b> {sent_at(sub['created_at'])}"
+STATUS_TEXT = {
+    "pending": "🆕 Статус: на проверке",
+    "published": "✅ Заявка принята и опубликована",
+    "rejected": "❌ Заявка отклонена",
+    "blocked": "🚫 Пользователь заблокирован",
+    "publish_uncertain": "⚠️ Публикация не подтверждена — проверь канал вручную",
+    "delivery_failed": "⚠️ Не удалось передать заявку в группу",
+}
+STATUS_BUTTON = {
+    "published": "✅ Принята",
+    "rejected": "❌ Отклонена",
+    "blocked": "🚫 Заблокирован",
+    "publish_uncertain": "⚠️ Проверь публикацию",
+    "delivery_failed": "⚠️ Ошибка доставки",
+}
+
+
+def status_buttons(sub_id: int, status: str) -> InlineKeyboardMarkup:
+    label = STATUS_BUTTON.get(status, "ℹ️ Заявка обработана")
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(text=label, callback_data=f"mod:status:{sub_id}")
+        ]]
     )
-    statuses = {
-        "published": "\n\n✅ <b>Принято</b>",
-        "rejected": "\n\n❌ <b>Отклонено</b>",
-        "blocked": "\n\n🚫 <b>Пользователь заблокирован</b>",
-        "publish_uncertain": "\n\n⚠️ <b>Не удалось подтвердить публикацию — проверьте чат вручную</b>",
-        "delivery_failed": "\n\n⚠️ <b>Не удалось передать заявку в группу</b>",
-    }
-    return text + statuses.get(status, "")
+
+
+def moderation_footer(sub, status: str) -> str:
+    username = f"@{sub['username']}" if sub["username"] else "без username"
+    name = sub["full_name"] or "Не указано"
+    return (
+        "━━━━━━━━━━━━━━\n"
+        f"👤 Отправитель: {username} · ID {sub['user_id']}\n"
+        f"🪪 Имя: {name}\n"
+        f"🕓 Отправлено: {sent_at(sub['created_at'])}\n"
+        f"{STATUS_TEXT.get(status, 'ℹ️ Заявка обработана')}"
+    )
+
+
+def stored_entities(item) -> list[MessageEntity]:
+    try:
+        values = json.loads(item["entities_json"] or "[]")
+        return [MessageEntity(**value) for value in values]
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return []
+
+
+def moderation_body(sub, item, status: str) -> tuple[str, str, list[MessageEntity]] | None:
+    """Return (kind, combined text/caption, original entities), without losing original formatting."""
+    content_type = str(item["content_type"] or "")
+    original = str(item["content_text"] or "")
+    footer = moderation_footer(sub, status)
+    combined = f"{original}\n\n{footer}" if original else footer
+    entities = stored_entities(item)
+
+    if content_type == "text":
+        return ("text", combined, entities) if len(combined) <= 4096 else None
+    if content_type in {"photo", "video", "animation", "document", "audio", "voice"}:
+        return ("caption", combined, entities) if len(combined) <= 1024 else None
+    return None
 
 
 def quote_preview(message: Message) -> str:
@@ -210,17 +245,25 @@ async def safe_notify(bot: Bot, chat_id: int, text: str) -> None:
         logger.info("Cannot notify user %s: %s", chat_id, exc)
 
 
-async def copy_submission(bot: Bot, destination: int | str, sub_id: int) -> list[int]:
-    """Copy one message or a complete album from the user's private chat."""
+async def copy_submission(
+    bot: Bot,
+    destination: int | str,
+    sub_id: int,
+    *,
+    moderation_controls: bool = False,
+) -> list[int]:
+    """Copy one original message or a complete Telegram album."""
     sub = db.get(sub_id)
     message_ids = db.message_ids(sub_id)
     if not sub or not message_ids:
         raise ValueError("Submission missing")
+
     if len(message_ids) == 1:
         copied = await bot.copy_message(
             chat_id=destination,
             from_chat_id=sub["user_id"],
             message_id=message_ids[0],
+            reply_markup=buttons(sub_id) if moderation_controls else None,
         )
         return [copied.message_id]
 
@@ -231,7 +274,16 @@ async def copy_submission(bot: Bot, destination: int | str, sub_id: int) -> list
     )
     if len(copied_messages) != len(message_ids):
         raise ValueError("Partial album copy; check the destination manually")
-    return [item.message_id for item in copied_messages]
+    copied_ids = [item.message_id for item in copied_messages]
+    if moderation_controls:
+        # Telegram copyMessages has no reply_markup parameter. Attach the buttons
+        # to the first item so the whole album remains grouped as one submission.
+        await bot.edit_message_reply_markup(
+            chat_id=destination,
+            message_id=copied_ids[0],
+            reply_markup=buttons(sub_id),
+        )
+    return copied_ids
 
 
 async def send_to_moderation_group(bot: Bot, sub_id: int) -> None:
@@ -249,12 +301,7 @@ async def send_to_moderation_group(bot: Bot, sub_id: int) -> None:
         return
 
     try:
-        await copy_submission(bot, target, sub_id)
-        card = await bot.send_message(
-            chat_id=target,
-            text=card_text(sub),
-            reply_markup=buttons(sub_id),
-        )
+        copied_ids = await copy_submission(bot, target, sub_id, moderation_controls=True)
     except (TelegramAPIError, ValueError) as exc:
         db.move(sub_id, "notifying", "delivery_failed")
         logger.exception("Could not deliver submission %s to moderation group: %s", sub_id, exc)
@@ -265,7 +312,10 @@ async def send_to_moderation_group(bot: Bot, sub_id: int) -> None:
         )
         return
 
-    db.set_card_pending(sub_id, card.message_id)
+    # The copied source message itself is the moderation card: no second card is sent.
+    db.set_card_pending(sub_id, copied_ids[0])
+    current_sub = db.get(sub_id) or sub
+    await update_moderation_card(bot, current_sub, "pending")
     await safe_notify(bot, sub["user_id"], "✅ Предложение отправлено на проверку.")
 
 
@@ -308,7 +358,10 @@ async def configure_commands(bot: Bot) -> None:
     if isinstance(moderation_id, int):
         try:
             await bot.set_my_commands(
-                [BotCommand(command="unblock", description="Разблокировать пользователя")],
+                [
+                    BotCommand(command="unblock", description="Разблокировать пользователя"),
+                    BotCommand(command="id", description="Показать ID этого чата"),
+                ],
                 scope=BotCommandScopeChat(chat_id=moderation_id),
             )
         except TelegramAPIError as exc:
@@ -405,6 +458,14 @@ async def start(message: Message) -> None:
     )
 
 
+@router.message(Command("id"), F.chat.type.in_({"group", "supergroup"}))
+async def chat_id_command(message: Message) -> None:
+    await message.answer(
+        f"ID этого чата: <code>{message.chat.id}</code>\n"
+        "Скопируй его без изменений в переменные окружения BotHost."
+    )
+
+
 @router.message(Command("unblock"), F.chat.type.in_({"group", "supergroup"}))
 async def unblock_command(message: Message) -> None:
     if message.chat.id != moderation_chat_id():
@@ -456,6 +517,17 @@ async def inbox(message: Message, bot: Bot) -> None:
             message_id=message.message_id,
             album_key=message.media_group_id,
             quote_text=quote_preview(message),
+            content_type=message.content_type,
+            content_text=message.text if message.text is not None else (message.caption or ""),
+            entities_json=json.dumps(
+                [
+                    entity.model_dump(exclude_none=True)
+                    for entity in (
+                        message.entities if message.text is not None else message.caption_entities
+                    ) or []
+                ],
+                ensure_ascii=False,
+            ),
         )
     except ValueError:
         await message.answer("Этот альбом уже отправлен. Попробуй отправить его ещё раз.")
@@ -522,19 +594,57 @@ async def group_reply_handler(message: Message, bot: Bot) -> None:
 
 
 async def update_moderation_card(bot: Bot, sub, status: str) -> None:
+    """Update the original copied message in place; never send a separate status card."""
     target = moderation_chat_id()
     card_id = sub["admin_card_id"]
     if not target or not card_id:
         return
+
+    items = db.items_for_submission(int(sub["id"]))
+    first_item = items[0] if items else None
+    body = moderation_body(sub, first_item, status) if first_item else None
+    markup = buttons(int(sub["id"])) if status == "pending" else None
+
     try:
-        await bot.edit_message_text(
+        if body:
+            kind, combined, entities = body
+            if kind == "text":
+                await bot.edit_message_text(
+                    chat_id=target,
+                    message_id=card_id,
+                    text=combined,
+                    entities=entities or None,
+                    parse_mode=None,
+                    reply_markup=markup,
+                )
+            else:
+                await bot.edit_message_caption(
+                    chat_id=target,
+                    message_id=card_id,
+                    caption=combined,
+                    caption_entities=entities or None,
+                    parse_mode=None,
+                    reply_markup=markup,
+                )
+            return
+    except TelegramAPIError as exc:
+        logger.warning(
+            "Could not update moderation content for submission %s: %s",
+            sub["id"],
+            exc,
+        )
+
+    # Some Telegram message types (stickers, round videos, etc.) have no editable
+    # text/caption. Keep the status on the same message's inline keyboard instead.
+    try:
+        fallback = markup if status == "pending" else status_buttons(int(sub["id"]), status)
+        await bot.edit_message_reply_markup(
             chat_id=target,
             message_id=card_id,
-            text=card_text(sub, status),
-            reply_markup=None,
+            reply_markup=fallback,
         )
     except TelegramAPIError as exc:
-        logger.warning("Could not update moderation card %s: %s", sub["id"], exc)
+        logger.warning("Could not update moderation buttons for submission %s: %s", sub["id"], exc)
 
 
 @router.callback_query(F.data.startswith("mod:"))
@@ -576,6 +686,17 @@ async def moderate(callback: CallbackQuery, bot: Bot) -> None:
     if message.message_id != sub["admin_card_id"]:
         await callback.answer("Эта кнопка не относится к карточке заявки.", show_alert=True)
         return
+    if action == "status":
+        labels = {
+            "published": "Заявка принята и опубликована.",
+            "rejected": "Заявка отклонена.",
+            "blocked": "Пользователь заблокирован.",
+            "publish_uncertain": "Публикация не подтверждена — проверь канал вручную.",
+            "delivery_failed": "Не удалось доставить заявку.",
+        }
+        await callback.answer(labels.get(sub["status"], "Заявка обработана."), show_alert=True)
+        return
+
     if sub["status"] != "pending":
         await callback.answer("Заявка уже обработана.")
         return
@@ -631,35 +752,28 @@ async def moderate(callback: CallbackQuery, bot: Bot) -> None:
         if not target:
             await callback.answer("Не настроен чат для публикации.", show_alert=True)
             return
+        if same_chat(target, mod_target):
+            await callback.answer(
+                "Группа модерации и канал публикации имеют один ID. "
+                "Укажи отдельный DESTINATION_CHAT_ID для канала в BotHost.",
+                show_alert=True,
+            )
+            return
         if not db.move(sub_id, "pending", "publishing"):
             await callback.answer("Заявка уже обрабатывается.")
             return
 
-        # If both chats are the same, the submitted content is already in that group.
-        # Do not copy it a second time.
-        if not same_chat(target, mod_target):
-            try:
-                published_message_ids = await copy_submission(bot, target, sub_id)
-            except (TelegramAPIError, ValueError) as exc:
-                db.move(sub_id, "publishing", "publish_uncertain")
-                logger.exception("Publication status uncertain for %s: %s", sub_id, exc)
-                sub = db.get(sub_id)
-                if sub:
-                    await update_moderation_card(bot, sub, "publish_uncertain")
-                await callback.answer("Ошибка публикации. Проверь чат вручную.", show_alert=True)
-                return
-
-            try:
-                await bot.send_message(
-                    chat_id=target,
-                    text=f"<blockquote>{html.escape(CHANNEL_DISCLAIMER)}</blockquote>",
-                    reply_parameters=ReplyParameters(
-                        message_id=published_message_ids[0],
-                        allow_sending_without_reply=True,
-                    ),
-                )
-            except TelegramAPIError as exc:
-                logger.warning("Published submission %s but could not send disclaimer: %s", sub_id, exc)
+        try:
+            # Publish only the original submission. No disclaimer or extra message.
+            await copy_submission(bot, target, sub_id)
+        except (TelegramAPIError, ValueError) as exc:
+            db.move(sub_id, "publishing", "publish_uncertain")
+            logger.exception("Publication status uncertain for %s: %s", sub_id, exc)
+            sub = db.get(sub_id)
+            if sub:
+                await update_moderation_card(bot, sub, "publish_uncertain")
+            await callback.answer("Ошибка публикации. Проверь канал вручную.", show_alert=True)
+            return
 
         db.move(sub_id, "publishing", "published")
         new_status = "published"
@@ -714,6 +828,12 @@ async def main() -> None:
         me = await bot.get_me()
         await resolve_configured_chats(bot)
         await configure_commands(bot)
+        if same_chat(moderation_chat_id(), destination_chat_id()):
+            logger.error(
+                "CONFIG ERROR: moderation group and publication chat are identical (%s). "
+                "Set MODERATION_CHAT_ID to the group and DESTINATION_CHAT_ID to the separate channel.",
+                moderation_chat_id(),
+            )
         logger.info(
             "Started as @%s. Moderation group: %s. Publication chat: %s",
             me.username,
