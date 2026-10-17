@@ -74,6 +74,9 @@ class StorageTests(unittest.TestCase):
         self.assertTrue(self.db.is_blocked(123))
         self.db.block_user(123, admin_id=22)
         self.assertTrue(self.db.is_blocked(123))
+        self.assertTrue(self.db.unblock_user(123))
+        self.assertFalse(self.db.is_blocked(123))
+        self.assertFalse(self.db.unblock_user(123))
 
 
 if __name__ == "__main__":
