@@ -176,6 +176,13 @@ class Storage:
                 (user_id, admin_id),
             )
 
+    def unblock_user(self, user_id: int) -> bool:
+        with self.conn:
+            cur = self.conn.execute(
+                "DELETE FROM blocked_users WHERE user_id=?", (user_id,)
+            )
+            return cur.rowcount == 1
+
     def get_setting(self, key: str) -> str | None:
         row = self.conn.execute(
             "SELECT value FROM settings WHERE key=?", (key,)
