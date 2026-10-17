@@ -6,6 +6,7 @@ import html
 import json
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -165,27 +166,208 @@ async def resolve_configured_chats(bot: Bot) -> None:
                 logger.error("Could not resolve fallback moderation group %s: %s", default_group, exc)
 
 
-def buttons(sub_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
+# Custom emoji IDs from the Telegram custom-emoji pack TgAndroidIcons.
+# Plain Unicode alternatives are retained for bots that cannot use custom emoji.
+CUSTOM_EMOJIS = {
+    "check": ("5825794181183836432", "✅"),
+    "ban": ("5872829476143894491", "🚫"),
+    "warning": ("5879813604068298387", "❗"),
+    "info": ("5879785854284599288", "ℹ️"),
+    "profile": ("5879770735999717115", "👤"),
+    "timer": ("5877613700344450910", "⏲"),
+    "chat": ("5884510167986343350", "💬"),
+    "wave": ("5870734657384877785", "👋"),
+}
+CUSTOM_EMOJI_BY_ID = {emoji_id: fallback for emoji_id, fallback in CUSTOM_EMOJIS.values()}
+CUSTOM_EMOJI_PATTERN = re.compile(r'<tg-emoji emoji-id="(\d+)">(.*?)</tg-emoji>', re.DOTALL)
+
+
+def ce(name: str) -> str:
+    emoji_id, fallback = CUSTOM_EMOJIS[name]
+    return f'<tg-emoji emoji-id="{emoji_id}">{fallback}</tg-emoji>'
+
+
+def strip_custom_emoji_markup(value: str) -> str:
+    return CUSTOM_EMOJI_PATTERN.sub(lambda match: match.group(2), value)
+
+
+def custom_emoji_markup_to_entities(value: str) -> tuple[str, list[MessageEntity]]:
+    parts: list[str] = []
+    entities: list[MessageEntity] = []
+    cursor = 0
+    offset = 0
+
+    def utf16_length(text: str) -> int:
+        return len(text.encode("utf-16-le")) // 2
+
+    for match in CUSTOM_EMOJI_PATTERN.finditer(value):
+        prefix = value[cursor:match.start()]
+        parts.append(prefix)
+        offset += utf16_length(prefix)
+
+        fallback = match.group(2)
+        parts.append(fallback)
+        length = utf16_length(fallback)
+        entities.append(
+            MessageEntity(
+                type="custom_emoji",
+                offset=offset,
+                length=length,
+                custom_emoji_id=match.group(1),
+            )
+        )
+        offset += length
+        cursor = match.end()
+
+    parts.append(value[cursor:])
+    return "".join(parts), entities
+
+
+def plain_keyboard(markup: InlineKeyboardMarkup | None) -> InlineKeyboardMarkup | None:
+    if markup is None:
+        return None
+    rows = []
+    for row in markup.inline_keyboard:
+        plain_row = []
+        for button in row:
+            emoji = CUSTOM_EMOJI_BY_ID.get(button.icon_custom_emoji_id or "")
+            if not emoji:
+                plain_row.append(button)
+                continue
+            data = button.model_dump(exclude_none=True)
+            data["text"] = f"{emoji} {button.text}"
+            data.pop("icon_custom_emoji_id", None)
+            plain_row.append(InlineKeyboardButton(**data))
+        rows.append(plain_row)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def has_custom_button_icons(markup: InlineKeyboardMarkup | None) -> bool:
+    return bool(
+        markup
+        and any(button.icon_custom_emoji_id for row in markup.inline_keyboard for button in row)
+    )
+
+
+async def safe_answer(message: Message, text: str, **kwargs):
+    try:
+        return await message.answer(text, **kwargs)
+    except TelegramBadRequest:
+        fallback_text = strip_custom_emoji_markup(text)
+        fallback_markup = plain_keyboard(kwargs.get("reply_markup"))
+        if fallback_text == text and not has_custom_button_icons(kwargs.get("reply_markup")):
+            raise
+        kwargs["reply_markup"] = fallback_markup
+        return await message.answer(fallback_text, **kwargs)
+
+
+async def safe_bot_send_message(bot: Bot, chat_id: int | str, text: str, **kwargs):
+    try:
+        return await bot.send_message(chat_id=chat_id, text=text, **kwargs)
+    except TelegramBadRequest:
+        fallback_text = strip_custom_emoji_markup(text)
+        fallback_markup = plain_keyboard(kwargs.get("reply_markup"))
+        if fallback_text == text and not has_custom_button_icons(kwargs.get("reply_markup")):
+            raise
+        kwargs["reply_markup"] = fallback_markup
+        return await bot.send_message(chat_id=chat_id, text=fallback_text, **kwargs)
+
+
+async def safe_bot_edit_message_text(
+    bot: Bot, chat_id: int, message_id: int, text: str, **kwargs
+):
+    try:
+        return await bot.edit_message_text(
+            chat_id=chat_id, message_id=message_id, text=text, **kwargs
+        )
+    except TelegramBadRequest:
+        fallback_text = strip_custom_emoji_markup(text)
+        fallback_markup = plain_keyboard(kwargs.get("reply_markup"))
+        if fallback_text == text and not has_custom_button_icons(kwargs.get("reply_markup")):
+            raise
+        kwargs["reply_markup"] = fallback_markup
+        return await bot.edit_message_text(
+            chat_id=chat_id, message_id=message_id, text=fallback_text, **kwargs
+        )
+
+
+async def safe_edit_text(message: Message, text: str, **kwargs):
+    try:
+        return await message.edit_text(text, **kwargs)
+    except TelegramBadRequest:
+        fallback_text = strip_custom_emoji_markup(text)
+        fallback_markup = plain_keyboard(kwargs.get("reply_markup"))
+        if fallback_text == text and not has_custom_button_icons(kwargs.get("reply_markup")):
+            raise
+        kwargs["reply_markup"] = fallback_markup
+        return await message.edit_text(fallback_text, **kwargs)
+
+
+async def safe_edit_reply_markup(
+    bot: Bot, chat_id: int, message_id: int, markup: InlineKeyboardMarkup | None
+):
+    try:
+        return await bot.edit_message_reply_markup(
+            chat_id=chat_id, message_id=message_id, reply_markup=markup
+        )
+    except TelegramBadRequest:
+        if not has_custom_button_icons(markup):
+            raise
+        return await bot.edit_message_reply_markup(
+            chat_id=chat_id, message_id=message_id, reply_markup=plain_keyboard(markup)
+        )
+
+
+def buttons(sub_id: int, *, custom_icons: bool = True) -> InlineKeyboardMarkup:
+    if custom_icons:
+        rows = [
+            [
+                InlineKeyboardButton(
+                    text="Принять",
+                    callback_data=f"mod:yes:{sub_id}",
+                    icon_custom_emoji_id=CUSTOM_EMOJIS["check"][0],
+                ),
+                InlineKeyboardButton(
+                    text="Отклонить",
+                    callback_data=f"mod:no:{sub_id}",
+                    icon_custom_emoji_id=CUSTOM_EMOJIS["ban"][0],
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Ответить",
+                    callback_data=f"mod:reply:{sub_id}",
+                    icon_custom_emoji_id=CUSTOM_EMOJIS["chat"][0],
+                ),
+                InlineKeyboardButton(
+                    text="Заблокировать",
+                    callback_data=f"mod:block:{sub_id}",
+                    icon_custom_emoji_id=CUSTOM_EMOJIS["ban"][0],
+                ),
+            ],
+        ]
+    else:
+        rows = [
             [
                 InlineKeyboardButton(text="✅ Принять", callback_data=f"mod:yes:{sub_id}"),
-                InlineKeyboardButton(text="❌ Отклонить", callback_data=f"mod:no:{sub_id}"),
+                InlineKeyboardButton(text="🚫 Отклонить", callback_data=f"mod:no:{sub_id}"),
             ],
             [
                 InlineKeyboardButton(text="💬 Ответить", callback_data=f"mod:reply:{sub_id}"),
                 InlineKeyboardButton(text="🚫 Заблокировать", callback_data=f"mod:block:{sub_id}"),
             ],
         ]
-    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def reply_cancel_buttons(sub_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="Отменить ответ", callback_data=f"mod:cancel:{sub_id}")]
-        ]
-    )
+def reply_cancel_buttons(sub_id: int, *, custom_icons: bool = True) -> InlineKeyboardMarkup:
+    text = "Отменить ответ" if custom_icons else "🚫 Отменить ответ"
+    button_args = {"text": text, "callback_data": f"mod:cancel:{sub_id}"}
+    if custom_icons:
+        button_args["icon_custom_emoji_id"] = CUSTOM_EMOJIS["ban"][0]
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(**button_args)]])
+
+
 
 
 def sent_at(utc_value: str) -> str:
@@ -198,40 +380,58 @@ def sent_at(utc_value: str) -> str:
 
 
 STATUS_TEXT = {
-    "pending": "🆕 Статус: на проверке",
-    "published": "✅ Заявка принята и опубликована",
-    "rejected": "❌ Заявка отклонена",
-    "blocked": "🚫 Пользователь заблокирован",
-    "publish_uncertain": "⚠️ Публикация не подтверждена — проверь канал вручную",
-    "delivery_failed": "⚠️ Не удалось передать заявку в группу",
+    "pending": f"{ce('info')} Статус: на проверке",
+    "published": f"{ce('check')} Заявка принята и опубликована",
+    "rejected": f"{ce('ban')} Заявка отклонена",
+    "blocked": f"{ce('ban')} Пользователь заблокирован",
+    "publish_uncertain": f"{ce('warning')} Публикация не подтверждена — проверь канал вручную",
+    "delivery_failed": f"{ce('warning')} Не удалось передать заявку в группу",
 }
 STATUS_BUTTON = {
-    "published": "✅ Принята",
-    "rejected": "❌ Отклонена",
-    "blocked": "🚫 Заблокирован",
-    "publish_uncertain": "⚠️ Проверь публикацию",
-    "delivery_failed": "⚠️ Ошибка доставки",
+    "published": "Принята",
+    "rejected": "Отклонена",
+    "blocked": "Заблокирован",
+    "publish_uncertain": "Проверь публикацию",
+    "delivery_failed": "Ошибка доставки",
+}
+STATUS_ICON = {
+    "published": "check",
+    "rejected": "ban",
+    "blocked": "ban",
+    "publish_uncertain": "warning",
+    "delivery_failed": "warning",
 }
 
 
-def status_buttons(sub_id: int, status: str) -> InlineKeyboardMarkup:
-    label = STATUS_BUTTON.get(status, "ℹ️ Заявка обработана")
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[
-            InlineKeyboardButton(text=label, callback_data=f"mod:status:{sub_id}")
-        ]]
-    )
+def status_buttons(
+    sub_id: int, status: str, *, custom_icons: bool = True
+) -> InlineKeyboardMarkup:
+    label = STATUS_BUTTON.get(status, "Заявка обработана")
+    icon_name = STATUS_ICON.get(status, "info")
+    if custom_icons:
+        button = InlineKeyboardButton(
+            text=label,
+            callback_data=f"mod:status:{sub_id}",
+            icon_custom_emoji_id=CUSTOM_EMOJIS[icon_name][0],
+        )
+    else:
+        button = InlineKeyboardButton(
+            text=f"{CUSTOM_EMOJIS[icon_name][1]} {label}",
+            callback_data=f"mod:status:{sub_id}",
+        )
+    return InlineKeyboardMarkup(inline_keyboard=[[button]])
 
 
 def moderation_footer(sub, status: str) -> str:
     username = f"@{sub['username']}" if sub["username"] else "без username"
     name = sub["full_name"] or "Не указано"
+    status_text = STATUS_TEXT.get(status, f"{ce('info')} Заявка обработана")
     return (
         "━━━━━━━━━━━━━━\n"
-        f"👤 Отправитель: {username} · ID {sub['user_id']}\n"
-        f"🪪 Имя: {name}\n"
-        f"🕓 Отправлено: {sent_at(sub['created_at'])}\n"
-        f"{STATUS_TEXT.get(status, 'ℹ️ Заявка обработана')}"
+        f"{ce('profile')} Отправитель: {username} · ID {sub['user_id']}\n"
+        f"{ce('profile')} Имя: {name}\n"
+        f"{ce('timer')} Отправлено: {sent_at(sub['created_at'])}\n"
+        f"{status_text}"
     )
 
 
@@ -244,12 +444,28 @@ def stored_entities(item) -> list[MessageEntity]:
 
 
 def moderation_body(sub, item, status: str) -> tuple[str, str, list[MessageEntity]] | None:
-    """Return (kind, combined text/caption, original entities), without losing original formatting."""
+    """Return the editable body with original formatting plus custom-emoji entities."""
     content_type = str(item["content_type"] or "")
     original = str(item["content_text"] or "")
-    footer = moderation_footer(sub, status)
-    combined = f"{original}\n\n{footer}" if original else footer
+    footer_markup = moderation_footer(sub, status)
+    footer, footer_entities = custom_emoji_markup_to_entities(footer_markup)
+    separator = "\n\n" if original else ""
+    combined = f"{original}{separator}{footer}"
     entities = stored_entities(item)
+
+    def utf16_length(text: str) -> int:
+        return len(text.encode("utf-16-le")) // 2
+
+    footer_offset = utf16_length(original + separator)
+    entities.extend(
+        MessageEntity(
+            type="custom_emoji",
+            offset=footer_offset + entity.offset,
+            length=entity.length,
+            custom_emoji_id=entity.custom_emoji_id,
+        )
+        for entity in footer_entities
+    )
 
     if content_type == "text":
         return ("text", combined, entities) if len(combined) <= 4096 else None
