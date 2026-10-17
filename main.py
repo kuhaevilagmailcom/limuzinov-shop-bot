@@ -1208,7 +1208,7 @@ async def moderate(callback: CallbackQuery, bot: Bot) -> None:
             return
 
         try:
-            # Publish only the original submission. No disclaimer or extra message.
+            # Publish the original submission and append the quoted disclaimer.
             await copy_submission(bot, target, sub_id)
         except (TelegramAPIError, ValueError) as exc:
             db.move(sub_id, "publishing", "publish_uncertain")
