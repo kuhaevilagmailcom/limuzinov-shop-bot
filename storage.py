@@ -22,6 +22,7 @@ class Storage:
                 status TEXT NOT NULL DEFAULT 'collecting',
                 admin_card_id INTEGER,
                 quote_text TEXT NOT NULL DEFAULT '',
+                keyboard_cleaned INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 UNIQUE(user_id, album_key)
             );
@@ -53,6 +54,10 @@ class Storage:
             self.conn.execute("ALTER TABLE submissions ADD COLUMN admin_card_id INTEGER")
         if "quote_text" not in columns:
             self.conn.execute("ALTER TABLE submissions ADD COLUMN quote_text TEXT NOT NULL DEFAULT ''")
+        if "keyboard_cleaned" not in columns:
+            self.conn.execute(
+                "ALTER TABLE submissions ADD COLUMN keyboard_cleaned INTEGER NOT NULL DEFAULT 0"
+            )
 
         item_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(items)")}
         if "content_type" not in item_columns:
@@ -201,6 +206,23 @@ class Storage:
                 "INSERT INTO settings(key,value) VALUES(?,?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (key, value),
+            )
+
+    def cards_needing_keyboard_cleanup(self) -> list[sqlite3.Row]:
+        """Return non-pending moderation cards whose old inline keyboards have not been checked."""
+        return list(
+            self.conn.execute(
+                "SELECT id, admin_card_id FROM submissions "
+                "WHERE admin_card_id IS NOT NULL AND status != 'pending' "
+                "AND keyboard_cleaned=0 ORDER BY id ASC"
+            )
+        )
+
+    def mark_keyboard_cleaned(self, submission_id: int) -> None:
+        with self.conn:
+            self.conn.execute(
+                "UPDATE submissions SET keyboard_cleaned=1 WHERE id=?",
+                (submission_id,),
             )
 
     def recoverable_ids(self) -> list[int]:
