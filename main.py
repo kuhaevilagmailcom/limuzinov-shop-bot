@@ -171,6 +171,7 @@ async def resolve_configured_chats(bot: Bot) -> None:
 CUSTOM_EMOJIS = {
     "check": ("5825794181183836432", "✅"),
     "ban": ("5872829476143894491", "🚫"),
+    "cross": ("5967355281057779430", "❌"),
     "warning": ("5879813604068298387", "❗"),
     "info": ("5879785854284599288", "ℹ️"),
     "profile": ("5879770735999717115", "👤"),
@@ -330,7 +331,7 @@ def buttons(sub_id: int, *, custom_icons: bool = True) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     text="Отклонить",
                     callback_data=f"mod:no:{sub_id}",
-                    icon_custom_emoji_id=CUSTOM_EMOJIS["ban"][0],
+                    icon_custom_emoji_id=CUSTOM_EMOJIS["cross"][0],
                 ),
             ],
             [
@@ -350,7 +351,7 @@ def buttons(sub_id: int, *, custom_icons: bool = True) -> InlineKeyboardMarkup:
         rows = [
             [
                 InlineKeyboardButton(text="✅ Принять", callback_data=f"mod:yes:{sub_id}"),
-                InlineKeyboardButton(text="🚫 Отклонить", callback_data=f"mod:no:{sub_id}"),
+                InlineKeyboardButton(text="❌ Отклонить", callback_data=f"mod:no:{sub_id}"),
             ],
             [
                 InlineKeyboardButton(text="💬 Ответить", callback_data=f"mod:reply:{sub_id}"),
@@ -382,7 +383,7 @@ def sent_at(utc_value: str) -> str:
 STATUS_TEXT = {
     "pending": f"{ce('info')} Статус: на проверке",
     "published": f"{ce('check')} Заявка принята и опубликована",
-    "rejected": f"{ce('ban')} Заявка отклонена",
+    "rejected": f"{ce('cross')} Заявка отклонена",
     "blocked": f"{ce('ban')} Пользователь заблокирован",
     "publish_uncertain": f"{ce('warning')} Публикация не подтверждена — проверь канал вручную",
     "delivery_failed": f"{ce('warning')} Не удалось передать заявку в группу",
@@ -396,7 +397,7 @@ STATUS_BUTTON = {
 }
 STATUS_ICON = {
     "published": "check",
-    "rejected": "ban",
+    "rejected": "cross",
     "blocked": "ban",
     "publish_uncertain": "warning",
     "delivery_failed": "warning",
