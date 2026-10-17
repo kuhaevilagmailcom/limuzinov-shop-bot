@@ -501,10 +501,10 @@ def quote_preview(message: Message) -> str:
 
 async def safe_notify(bot: Bot, chat_id: int, text: str) -> None:
     try:
-        await bot.send_message(chat_id, text)
+        await safe_bot_send_message(bot, chat_id, text)
     except TelegramBadRequest:
         try:
-            await bot.send_message(chat_id, html.escape(text))
+            await bot.send_message(chat_id, html.escape(strip_custom_emoji_markup(text)))
         except TelegramAPIError as exc:
             logger.info("Cannot notify user %s: %s", chat_id, exc)
     except TelegramAPIError as exc:
@@ -525,12 +525,23 @@ async def copy_submission(
         raise ValueError("Submission missing")
 
     if len(message_ids) == 1:
-        copied = await bot.copy_message(
-            chat_id=destination,
-            from_chat_id=sub["user_id"],
-            message_id=message_ids[0],
-            reply_markup=buttons(sub_id) if moderation_controls else None,
-        )
+        markup = buttons(sub_id) if moderation_controls else None
+        try:
+            copied = await bot.copy_message(
+                chat_id=destination,
+                from_chat_id=sub["user_id"],
+                message_id=message_ids[0],
+                reply_markup=markup,
+            )
+        except TelegramBadRequest:
+            if not has_custom_button_icons(markup):
+                raise
+            copied = await bot.copy_message(
+                chat_id=destination,
+                from_chat_id=sub["user_id"],
+                message_id=message_ids[0],
+                reply_markup=plain_keyboard(markup),
+            )
         return [copied.message_id]
 
     copied_messages = await bot.copy_messages(
@@ -544,10 +555,11 @@ async def copy_submission(
     if moderation_controls:
         # Telegram copyMessages has no reply_markup parameter. Attach the buttons
         # to the first item so the whole album remains grouped as one submission.
-        await bot.edit_message_reply_markup(
+        await safe_edit_reply_markup(
+            bot,
             chat_id=destination,
             message_id=copied_ids[0],
-            reply_markup=buttons(sub_id),
+            markup=buttons(sub_id),
         )
     return copied_ids
 
@@ -649,7 +661,8 @@ def clear_reply_session(user_id: int) -> dict[str, object] | None:
 
 async def edit_reply_prompt(bot: Bot, chat_id: int, prompt_message_id: int, text: str) -> None:
     try:
-        await bot.edit_message_text(
+        await safe_bot_edit_message_text(
+            bot,
             chat_id=chat_id,
             message_id=prompt_message_id,
             text=text,
@@ -680,7 +693,7 @@ async def expire_reply_session(
             bot,
             chat_id,
             prompt_message_id,
-            "⌛ <b>Время ответа истекло.</b>\nНажми «Ответить» на карточке заявки, чтобы начать заново.",
+            f"{ce('timer')} <b>Время ответа истекло.</b>\nНажми «Ответить» на карточке заявки, чтобы начать заново.",
         )
 
 
@@ -693,9 +706,10 @@ async def deliver_group_reply(bot: Bot, message: Message, session: dict[str, obj
     )
 
     if message.text is not None:
-        combined = f"💬 <b>Ответ на твоё предложение</b>\n\n{html.escape(message.text)}"
+        combined = f"{ce('chat')} <b>Ответ на твоё предложение</b>\n\n{html.escape(message.text)}"
         if len(combined) <= 3900:
-            await bot.send_message(
+            await safe_bot_send_message(
+                bot,
                 target_user_id,
                 combined,
                 reply_parameters=reply_parameters,
@@ -715,10 +729,11 @@ async def start(message: Message) -> None:
     if not message.from_user:
         return
     if db.is_blocked(message.from_user.id):
-        await message.answer("🚫 Доступ к отправке предложений заблокирован.")
+        await safe_answer(message, f"{ce('ban')} Доступ к отправке предложений заблокирован.")
         return
-    await message.answer(
-        "<b>Предложка</b>\n\n"
+    await safe_answer(
+        message,
+        f"{ce('wave')} <b>Предложка</b>\n\n"
         "Отправь сюда текст, фото, видео, кружок, голосовое, GIF, стикер или файл. "
         "Предложение появится в группе на проверке."
     )
@@ -748,7 +763,7 @@ async def unblock_command(message: Message) -> None:
         return
     target_user_id = int(parts[1].strip())
     if db.unblock_user(target_user_id):
-        await message.answer(f"✅ Пользователь <code>{target_user_id}</code> разблокирован.")
+        await safe_answer(message, f"{ce('check')} Пользователь <code>{target_user_id}</code> разблокирован.")
     else:
         await message.answer(f"Пользователь <code>{target_user_id}</code> не был заблокирован.")
 
@@ -760,7 +775,7 @@ async def inbox(message: Message, bot: Bot) -> None:
     sender_id = message.from_user.id
 
     if db.is_blocked(sender_id):
-        await message.answer("🚫 Доступ к отправке предложений заблокирован.")
+        await safe_answer(message, f"{ce('ban')} Доступ к отправке предложений заблокирован.")
         return
 
     if message.text and message.text.startswith("/"):
@@ -835,7 +850,7 @@ async def group_reply_handler(message: Message, bot: Bot) -> None:
                 bot,
                 message.chat.id,
                 int(old_session["prompt_message_id"]),
-                "⌛ <b>Время ответа истекло.</b>",
+                f"{ce('timer')} <b>Время ответа истекло.</b>",
             )
         return
 
@@ -848,8 +863,9 @@ async def group_reply_handler(message: Message, bot: Bot) -> None:
             session.get("user_id"),
             exc,
         )
-        await message.answer(
-            "❌ Не удалось доставить ответ. Возможно, пользователь заблокировал бота. "
+        await safe_answer(
+            message,
+            f"{ce('warning')} Не удалось доставить ответ. Возможно, пользователь заблокировал бота. "
             "Режим ответа остаётся активным — попробуй ещё раз."
         )
         return
@@ -862,7 +878,7 @@ async def group_reply_handler(message: Message, bot: Bot) -> None:
             int(old_session["prompt_message_id"]),
             "✅ <b>Ответ отправлен пользователю.</b>",
         )
-    await message.answer("✅ Ответ отправлен пользователю.")
+    await safe_answer(message, f"{ce('check')} Ответ отправлен пользователю.")
 
 
 async def update_moderation_card(bot: Bot, sub, status: str) -> None:
@@ -899,6 +915,42 @@ async def update_moderation_card(bot: Bot, sub, status: str) -> None:
                     reply_markup=markup,
                 )
             return
+    except TelegramBadRequest as exc:
+        logger.info(
+            "Custom emoji edit failed for submission %s; retrying with standard emoji fallbacks: %s",
+            sub["id"],
+            exc,
+        )
+        try:
+            fallback_entities = [
+                entity for entity in (entities or []) if entity.type != "custom_emoji"
+            ]
+            fallback_markup = plain_keyboard(markup)
+            if kind == "text":
+                await bot.edit_message_text(
+                    chat_id=target,
+                    message_id=card_id,
+                    text=combined,
+                    entities=fallback_entities or None,
+                    parse_mode=None,
+                    reply_markup=fallback_markup,
+                )
+            else:
+                await bot.edit_message_caption(
+                    chat_id=target,
+                    message_id=card_id,
+                    caption=combined,
+                    caption_entities=fallback_entities or None,
+                    parse_mode=None,
+                    reply_markup=fallback_markup,
+                )
+            return
+        except TelegramAPIError as fallback_exc:
+            logger.warning(
+                "Could not update moderation content for submission %s even with fallbacks: %s",
+                sub["id"],
+                fallback_exc,
+            )
     except TelegramAPIError as exc:
         logger.warning(
             "Could not update moderation content for submission %s: %s",
@@ -910,10 +962,11 @@ async def update_moderation_card(bot: Bot, sub, status: str) -> None:
     # text/caption. Keep the status on the same message's inline keyboard instead.
     try:
         fallback = markup if status == "pending" else status_buttons(int(sub["id"]), status)
-        await bot.edit_message_reply_markup(
+        await safe_edit_reply_markup(
+            bot,
             chat_id=target,
             message_id=card_id,
-            reply_markup=fallback,
+            markup=fallback,
         )
     except TelegramAPIError as exc:
         logger.warning("Could not update moderation buttons for submission %s: %s", sub["id"], exc)
@@ -945,7 +998,7 @@ async def moderate(callback: CallbackQuery, bot: Bot) -> None:
             return
         clear_reply_session(callback.from_user.id)
         try:
-            await message.edit_text("❌ <b>Ответ отменён.</b>", reply_markup=None)
+            await safe_edit_text(message, f"{ce('ban')} <b>Ответ отменён.</b>", reply_markup=None)
         except TelegramAPIError:
             pass
         await callback.answer("Ответ отменён.")
@@ -988,14 +1041,15 @@ async def moderate(callback: CallbackQuery, bot: Bot) -> None:
                     bot,
                     message.chat.id,
                     int(old_session["prompt_message_id"]),
-                    "⌛ <b>Время ответа истекло.</b>",
+                    f"{ce('timer')} <b>Время ответа истекло.</b>",
                 )
 
-        prompt = await bot.send_message(
+        prompt = await safe_bot_send_message(
+            bot,
             chat_id=message.chat.id,
             text=(
-                "✍️ <b>Ответь на это сообщение, чтобы отправить ответ пользователю.</b>\n"
-                "У тебя есть <b>15 минут</b>. Ответ придёт пользователю в личку с цитатой его предложения.\n\n"
+                f"{ce('chat')} <b>Ответь на это сообщение, чтобы отправить ответ пользователю.</b>\n"
+                f"{ce('timer')} У тебя есть <b>15 минут</b>. Ответ придёт пользователю в личку с цитатой его предложения.\n\n"
                 f"<b>Исходное сообщение:</b>\n<blockquote>"
                 f"{html.escape(str(sub['quote_text'] or '[Сообщение]'))}</blockquote>"
             ),
