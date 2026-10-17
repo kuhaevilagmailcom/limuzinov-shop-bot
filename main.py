@@ -38,6 +38,8 @@ DB_PATH = os.getenv("DB_PATH", str(ROOT / "suggestions.sqlite3"))
 
 REQUESTED_DEFAULT_CHAT_ID = "-5106639548"
 LEGACY_DEFAULT_CHAT_IDS = {"-1004422721133", "-1001358443115"}
+# These IDs are used only to remove obsolete private command menus from older versions.
+LEGACY_COMMAND_CHAT_IDS = (8798455134, 438672098)
 DESTINATION_ENV = os.getenv("DESTINATION_CHAT_ID", os.getenv("CHANNEL_ID", "")).strip()
 MODERATION_ENV = os.getenv("MODERATION_CHAT_ID", "").strip()
 DEFAULT_CHAT_ID = (
@@ -283,6 +285,7 @@ async def configure_commands(bot: Bot) -> None:
         BotCommandScopeAllPrivateChats(),
         BotCommandScopeAllGroupChats(),
         BotCommandScopeAllChatAdministrators(),
+        *(BotCommandScopeChat(chat_id=chat_id) for chat_id in LEGACY_COMMAND_CHAT_IDS),
     ]
     moderation_id = moderation_chat_id()
     if isinstance(moderation_id, int):
