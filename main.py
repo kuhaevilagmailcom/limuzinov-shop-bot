@@ -48,7 +48,14 @@ ADMIN_IDS = tuple(
 # Keep the old singular name as an alias for legacy records/configuration.
 ADMIN_ID = ADMIN_IDS[0]
 DB_PATH = os.getenv("DB_PATH", str(ROOT / "suggestions.sqlite3"))
-DEFAULT_CHANNEL_ID = os.getenv("CHANNEL_ID", "-1004422721133").strip() or "-1004422721133"
+DEFAULT_CHANNEL_ID = os.getenv("CHANNEL_ID", "-1001358443115").strip() or "-1001358443115"
+CHANNEL_DISCLAIMER = (
+    "This channel fully complies with all platform rules and community guidelines. "
+    "Content is intended for legal and acceptable use only.\n\n"
+    "Attention: We strictly comply with laws and ethical standards. "
+    "All information is provided solely for research and educational purposes. "
+    "We do not encourage or carry out unauthorized collection or dissemination of personal data."
+)
 STICKER_PACK = os.getenv("EMOJI_PACK", "vector_icons_by_fStikBot").strip()
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Yekaterinburg")
 CONFIRM_EMOJI_ID = "5219899949281453881"
@@ -219,25 +226,28 @@ async def safe_notify(bot: Bot, chat_id: int, text: str) -> None:
         logger.info("Cannot notify user %s: %s", chat_id, exc)
 
 
-async def copy_submission(bot: Bot, destination: int | str, sub_id: int) -> None:
+async def copy_submission(bot: Bot, destination: int | str, sub_id: int) -> list[int]:
+    """Copy a submission and return the published Telegram message IDs."""
     sub = db.get(sub_id)
     message_ids = db.message_ids(sub_id)
     if not sub or not message_ids:
         raise ValueError("Submission missing")
     if len(message_ids) == 1:
-        await bot.copy_message(
+        copied = await bot.copy_message(
             chat_id=destination,
             from_chat_id=sub["user_id"],
             message_id=message_ids[0],
         )
-    else:
-        result = await bot.copy_messages(
-            chat_id=destination,
-            from_chat_id=sub["user_id"],
-            message_ids=message_ids,
-        )
-        if len(result) != len(message_ids):
-            raise ValueError("Partial album copy; review destination before retry")
+        return [copied.message_id]
+
+    result = await bot.copy_messages(
+        chat_id=destination,
+        from_chat_id=sub["user_id"],
+        message_ids=message_ids,
+    )
+    if len(result) != len(message_ids):
+        raise ValueError("Partial album copy; review destination before retry")
+    return [item.message_id for item in result]
 
 
 async def send_to_admin(bot: Bot, sub_id: int) -> None:
@@ -714,17 +724,40 @@ async def moderate(callback: CallbackQuery, bot: Bot) -> None:
             await callback.answer("Уже обрабатывается.")
             return
         try:
-            await copy_submission(bot, target, sub_id)
+            published_message_ids = await copy_submission(bot, target, sub_id)
         except (TelegramAPIError, ValueError) as exc:
             # Never silently retry an ambiguous partial publish; avoid duplicates.
             db.move(sub_id, "publishing", "publish_uncertain")
             logger.exception("Publish status uncertain for %s: %s", sub_id, exc)
             await callback.answer("Ошибка публикации. Проверь канал вручную.", show_alert=True)
             return
+
+        # Post the requested disclaimer as a real blockquote, replying to the accepted post.
+        disclaimer_sent = True
+        try:
+            await bot.send_message(
+                chat_id=target,
+                text=f"<blockquote>{html.escape(CHANNEL_DISCLAIMER)}</blockquote>",
+                reply_parameters=ReplyParameters(
+                    message_id=published_message_ids[0],
+                    allow_sending_without_reply=True,
+                ),
+            )
+        except TelegramAPIError as exc:
+            disclaimer_sent = False
+            logger.exception(
+                "Submission %s was published, but its disclaimer could not be sent: %s",
+                sub_id, exc,
+            )
+
         db.move(sub_id, "publishing", "published")
         new_status = "published"
-        notice = "✅ Твоё предложение принято и опубликовано!"
-        toast = "Принято"
+        notice = (
+            "✅ Твоё предложение принято и опубликовано!"
+            if disclaimer_sent
+            else "✅ Твоё предложение опубликовано, но служебная цитата не отправилась."
+        )
+        toast = "Принято" if disclaimer_sent else "Опубликовано, но цитата не отправилась"
     elif action == "no":
         if not db.move(sub_id, "pending", "rejected"):
             await callback.answer("Уже обрабатывается.")
