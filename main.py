@@ -325,6 +325,7 @@ async def ensure_admin_commands(bot: Bot) -> None:
     admin_commands = [
         BotCommand(command="start", description="Предложить сообщение"),
         BotCommand(command="channel", description="Канал для публикаций"),
+        BotCommand(command="unblock", description="Разблокировать пользователя"),
     ]
     for admin_id in ADMIN_IDS:
         try:
@@ -471,6 +472,21 @@ async def set_channel(message: Message, bot: Bot) -> None:
     await message.answer(
         f"{glyph('ok')} Канал подключён: <b>{html.escape(ch.title or str(ch.id))}</b>."
     )
+
+
+@router.message(Command("unblock"), F.chat.type == "private")
+async def unblock_command(message: Message) -> None:
+    if not message.from_user or message.from_user.id not in ADMIN_IDS:
+        return
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) != 2 or not parts[1].strip().isdigit():
+        await message.answer("Используй: <code>/unblock USER_ID</code>")
+        return
+    target_user_id = int(parts[1].strip())
+    if db.unblock_user(target_user_id):
+        await message.answer(f"✅ Пользователь <code>{target_user_id}</code> разблокирован.")
+    else:
+        await message.answer(f"Пользователь <code>{target_user_id}</code> не был заблокирован.")
 
 
 @router.message(F.chat.type == "private")
@@ -717,6 +733,9 @@ async def moderate(callback: CallbackQuery, bot: Bot) -> None:
         notice = "❌ Твоё предложение не принято."
         toast = "Не принято"
     elif action == "block":
+        if sub["user_id"] in ADMIN_IDS:
+            await callback.answer("Нельзя заблокировать администратора.", show_alert=True)
+            return
         if not db.move(sub_id, "pending", "blocked"):
             await callback.answer("Уже обрабатывается.")
             return
