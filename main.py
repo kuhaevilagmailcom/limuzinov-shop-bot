@@ -149,6 +149,21 @@ async def resolve_configured_chats(bot: Bot) -> None:
         except TelegramAPIError as exc:
             logger.warning("Could not resolve moderation group %s: %s", moderation, exc)
 
+    # Compare Telegram's canonical IDs too: a channel username and its numeric ID can
+    # refer to the same chat even when the raw environment strings look different.
+    if same_chat(resolved_destination_chat_id, resolved_moderation_chat_id):
+        default_group = parse_chat_id(REQUESTED_DEFAULT_CHAT_ID)
+        if not same_chat(default_group, resolved_destination_chat_id):
+            try:
+                resolved_moderation_chat_id = (await bot.get_chat(default_group)).id
+                logger.warning(
+                    "Resolved moderation and publication chats were identical. "
+                    "Falling back to known moderation group %s; set MODERATION_CHAT_ID explicitly.",
+                    resolved_moderation_chat_id,
+                )
+            except TelegramAPIError as exc:
+                logger.error("Could not resolve fallback moderation group %s: %s", default_group, exc)
+
 
 def buttons(sub_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
