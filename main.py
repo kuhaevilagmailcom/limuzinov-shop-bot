@@ -318,7 +318,9 @@ async def safe_edit_reply_markup(
         return await bot.edit_message_reply_markup(
             chat_id=chat_id, message_id=message_id, reply_markup=markup
         )
-    except TelegramBadRequest:
+    except TelegramBadRequest as exc:
+        if markup is None and "message is not modified" in str(exc).lower():
+            return
         if not has_custom_button_icons(markup):
             raise
         return await bot.edit_message_reply_markup(
@@ -1079,7 +1081,9 @@ async def update_moderation_card(bot: Bot, sub, status: str) -> None:
     # Some Telegram message types (stickers, round videos, etc.) have no editable
     # text/caption. Keep the status on the same message's inline keyboard instead.
     try:
-        fallback = markup if status == "pending" else status_buttons(int(sub["id"]), status)
+        # Processed cards should have no inline keyboard at all.
+        # Only pending submissions retain moderation controls.
+        fallback = markup if status == "pending" else None
         await safe_edit_reply_markup(
             bot,
             chat_id=target,
@@ -1248,6 +1252,56 @@ async def moderate(callback: CallbackQuery, bot: Bot) -> None:
     await safe_notify(bot, sub["user_id"], notice)
 
 
+async def cleanup_processed_inline_keyboards(bot: Bot) -> None:
+    """Remove stale inline keyboards from processed cards left by older bot versions."""
+    target = moderation_chat_id()
+    if target is None:
+        return
+
+    cards = db.cards_needing_keyboard_cleanup()
+    if not cards:
+        logger.info("Inline keyboard cleanup: no processed cards need checking.")
+        return
+
+    checked = 0
+    failures = 0
+    for card in cards:
+        submission_id = int(card["id"])
+        try:
+            await bot.edit_message_reply_markup(
+                chat_id=target,
+                message_id=int(card["admin_card_id"]),
+                reply_markup=None,
+            )
+        except TelegramBadRequest as exc:
+            # "Message is not modified" means the keyboard is already gone.
+            # Other BadRequest errors are permanent for this particular message too.
+            if "message is not modified" not in str(exc).lower():
+                logger.warning(
+                    "Could not clean inline keyboard for submission %s: %s",
+                    submission_id,
+                    exc,
+                )
+            db.mark_keyboard_cleaned(submission_id)
+            checked += 1
+        except TelegramAPIError as exc:
+            failures += 1
+            logger.warning(
+                "Temporary Telegram API error while cleaning submission %s; will retry next startup: %s",
+                submission_id,
+                exc,
+            )
+        else:
+            db.mark_keyboard_cleaned(submission_id)
+            checked += 1
+
+    logger.info(
+        "Inline keyboard cleanup finished: %s processed cards checked, %s API failures.",
+        checked,
+        failures,
+    )
+
+
 async def recover(bot: Bot) -> None:
     await asyncio.sleep(5)
     for sub_id in db.recoverable_ids():
@@ -1295,6 +1349,7 @@ async def main() -> None:
             destination_chat_id(),
             destination_config_source(),
         )
+        await cleanup_processed_inline_keyboards(bot)
         recovery_job = asyncio.create_task(recover(bot))
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
