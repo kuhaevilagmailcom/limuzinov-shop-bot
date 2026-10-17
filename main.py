@@ -48,7 +48,15 @@ ADMIN_IDS = tuple(
 # Keep the old singular name as an alias for legacy records/configuration.
 ADMIN_ID = ADMIN_IDS[0]
 DB_PATH = os.getenv("DB_PATH", str(ROOT / "suggestions.sqlite3"))
-DEFAULT_CHANNEL_ID = os.getenv("CHANNEL_ID", "-1001358443115").strip() or "-1001358443115"
+REQUESTED_DEFAULT_CHANNEL_ID = "-1001358443115"
+PREVIOUS_DEFAULT_CHANNEL_ID = "-1004422721133"
+_configured_channel_id = os.getenv("CHANNEL_ID", REQUESTED_DEFAULT_CHANNEL_ID).strip()
+# Replace the previous built-in default, but preserve any deliberately configured custom channel.
+DEFAULT_CHANNEL_ID = (
+    REQUESTED_DEFAULT_CHANNEL_ID
+    if _configured_channel_id in ("", PREVIOUS_DEFAULT_CHANNEL_ID)
+    else _configured_channel_id
+)
 CHANNEL_DISCLAIMER = (
     "This channel fully complies with all platform rules and community guidelines. "
     "Content is intended for legal and acceptable use only.\n\n"
@@ -118,7 +126,7 @@ async def load_pack(bot: Bot) -> None:
 def channel_id() -> str | int | None:
     value = db.get_setting("channel_id")
     # Migrate the previous built-in default to the newly requested channel.
-    if value == "-1004422721133" and DEFAULT_CHANNEL_ID == "-1001358443115":
+    if value == PREVIOUS_DEFAULT_CHANNEL_ID and DEFAULT_CHANNEL_ID == REQUESTED_DEFAULT_CHANNEL_ID:
         value = DEFAULT_CHANNEL_ID
         db.set_setting("channel_id", value)
     value = value or DEFAULT_CHANNEL_ID
