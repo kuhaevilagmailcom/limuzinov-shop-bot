@@ -594,7 +594,7 @@ async def send_to_moderation_group(bot: Bot, sub_id: int) -> None:
     db.set_card_pending(sub_id, copied_ids[0])
     current_sub = db.get(sub_id) or sub
     await update_moderation_card(bot, current_sub, "pending")
-    await safe_notify(bot, sub["user_id"], "✅ Предложение отправлено на проверку.")
+    await safe_notify(bot, sub["user_id"], f"{ce('check')} Предложение отправлено на проверку.")
 
 
 async def finish_album(bot: Bot, sub_id: int, key: tuple[int, str]) -> None:
@@ -876,7 +876,7 @@ async def group_reply_handler(message: Message, bot: Bot) -> None:
             bot,
             message.chat.id,
             int(old_session["prompt_message_id"]),
-            "✅ <b>Ответ отправлен пользователю.</b>",
+            f"{ce('check')} <b>Ответ отправлен пользователю.</b>",
         )
     await safe_answer(message, f"{ce('check')} Ответ отправлен пользователю.")
 
@@ -1103,14 +1103,14 @@ async def moderate(callback: CallbackQuery, bot: Bot) -> None:
 
         db.move(sub_id, "publishing", "published")
         new_status = "published"
-        notice = "✅ Твоё предложение принято и опубликовано!"
+        notice = f"{ce('check')} Твоё предложение принято и опубликовано!"
         toast = "Принято"
     elif action == "no":
         if not db.move(sub_id, "pending", "rejected"):
             await callback.answer("Заявка уже обрабатывается.")
             return
         new_status = "rejected"
-        notice = "❌ Твоё предложение не принято."
+        notice = f"{ce('ban')} Твоё предложение не принято."
         toast = "Отклонено"
     elif action == "block":
         if not db.move(sub_id, "pending", "blocked"):
@@ -1118,7 +1118,7 @@ async def moderate(callback: CallbackQuery, bot: Bot) -> None:
             return
         db.block_user(sub["user_id"], callback.from_user.id)
         new_status = "blocked"
-        notice = "🚫 Доступ к отправке предложений заблокирован."
+        notice = f"{ce('ban')} Доступ к отправке предложений заблокирован."
         toast = "Пользователь заблокирован"
     else:
         await callback.answer("Неизвестное действие.", show_alert=True)
