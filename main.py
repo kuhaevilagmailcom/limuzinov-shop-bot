@@ -56,7 +56,7 @@ REPLY_TIMEOUT = 15 * 60
 
 PUBLICATION_DISCLAIMER = (
     "This channel fully complies with all platform rules and community guidelines. "
-    "Content is intended for legal and acceptable use only.\\n\\n"
+    "Content is intended for legal and acceptable use only.\n\n"
     "Attention: We strictly comply with laws and ethical standards. All information is provided solely "
     "for research and educational purposes. We do not encourage or carry out unauthorized collection "
     "or dissemination of personal data."
@@ -588,22 +588,36 @@ async def add_publication_disclaimer(
 
     # Stickers, round videos, oversized captions, or non-editable posts still get
     # the disclaimer as a quoted reply so it is never silently omitted.
-    await bot.send_message(
-        chat_id=destination,
-        text=PUBLICATION_DISCLAIMER,
-        entities=[
-            MessageEntity(
-                type="blockquote",
-                offset=0,
-                length=utf16_length(PUBLICATION_DISCLAIMER),
-            )
-        ],
-        parse_mode=None,
-        reply_parameters=ReplyParameters(
-            message_id=copied_ids[0],
-            allow_sending_without_reply=True,
-        ),
-    )
+    quoted_entities = [
+        MessageEntity(
+            type="blockquote",
+            offset=0,
+            length=utf16_length(PUBLICATION_DISCLAIMER),
+        )
+    ]
+    try:
+        await bot.send_message(
+            chat_id=destination,
+            text=PUBLICATION_DISCLAIMER,
+            entities=quoted_entities,
+            parse_mode=None,
+            reply_parameters=ReplyParameters(
+                message_id=copied_ids[0],
+                allow_sending_without_reply=True,
+            ),
+        )
+    except TelegramAPIError as exc:
+        logger.warning(
+            "Could not attach disclaimer as a reply to message %s; sending it as a separate quoted post: %s",
+            copied_ids[0],
+            exc,
+        )
+        await bot.send_message(
+            chat_id=destination,
+            text=PUBLICATION_DISCLAIMER,
+            entities=quoted_entities,
+            parse_mode=None,
+        )
 
 
 async def copy_submission(
