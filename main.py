@@ -48,14 +48,17 @@ ADMIN_IDS = tuple(
 # Keep the old singular name as an alias for legacy records/configuration.
 ADMIN_ID = ADMIN_IDS[0]
 DB_PATH = os.getenv("DB_PATH", str(ROOT / "suggestions.sqlite3"))
-REQUESTED_DEFAULT_CHANNEL_ID = "-1001358443115"
-PREVIOUS_DEFAULT_CHANNEL_ID = "-1004422721133"
-_configured_channel_id = os.getenv("CHANNEL_ID", REQUESTED_DEFAULT_CHANNEL_ID).strip()
-# Replace the previous built-in default, but preserve any deliberately configured custom channel.
-DEFAULT_CHANNEL_ID = (
-    REQUESTED_DEFAULT_CHANNEL_ID
-    if _configured_channel_id in ("", PREVIOUS_DEFAULT_CHANNEL_ID)
-    else _configured_channel_id
+REQUESTED_DEFAULT_CHAT_ID = "-5106639548"
+LEGACY_DEFAULT_CHAT_IDS = {"-1004422721133", "-1001358443115"}
+_configured_chat_id = os.getenv(
+    "DESTINATION_CHAT_ID",
+    os.getenv("CHANNEL_ID", REQUESTED_DEFAULT_CHAT_ID),
+).strip()
+# Move previous built-in defaults to the requested group while preserving custom destinations.
+DEFAULT_CHAT_ID = (
+    REQUESTED_DEFAULT_CHAT_ID
+    if not _configured_chat_id or _configured_chat_id in LEGACY_DEFAULT_CHAT_IDS
+    else _configured_chat_id
 )
 CHANNEL_DISCLAIMER = (
     "This channel fully complies with all platform rules and community guidelines. "
@@ -123,13 +126,13 @@ async def load_pack(bot: Bot) -> None:
         logger.warning("Emoji pack unavailable, using Unicode fallback: %s", exc)
 
 
-def channel_id() -> str | int | None:
+def destination_chat_id() -> str | int | None:
     value = db.get_setting("channel_id")
-    # Migrate the previous built-in default to the newly requested channel.
-    if value == PREVIOUS_DEFAULT_CHANNEL_ID and DEFAULT_CHANNEL_ID == REQUESTED_DEFAULT_CHANNEL_ID:
-        value = DEFAULT_CHANNEL_ID
+    # Migrate either previous built-in channel default to the requested group.
+    if value in LEGACY_DEFAULT_CHAT_IDS and DEFAULT_CHAT_ID == REQUESTED_DEFAULT_CHAT_ID:
+        value = DEFAULT_CHAT_ID
         db.set_setting("channel_id", value)
-    value = value or DEFAULT_CHANNEL_ID
+    value = value or DEFAULT_CHAT_ID
     if not value:
         return None
     return int(value) if value.lstrip("-").isdigit() else value
@@ -347,7 +350,7 @@ async def ensure_admin_commands(bot: Bot) -> None:
     """Give all configured admins the channel command in their private-chat menu."""
     admin_commands = [
         BotCommand(command="start", description="Предложить сообщение"),
-        BotCommand(command="channel", description="Канал для публикаций"),
+        BotCommand(command="channel", description="Чат для публикаций"),
         BotCommand(command="unblock", description="Разблокировать пользователя"),
     ]
     for admin_id in ADMIN_IDS:
@@ -464,36 +467,49 @@ async def set_channel(message: Message, bot: Bot) -> None:
         return
     parts = (message.text or "").split(maxsplit=1)
     if len(parts) < 2:
-        current = html.escape(str(channel_id() or "не подключён"))
+        current = html.escape(str(destination_chat_id() or "не подключён"))
         await message.answer(
-            f"<b>Канал:</b> <code>{current}</code>\n\n"
-            "Установить: <code>/channel @username</code> или <code>/channel -100...</code>"
+            f"<b>Чат для публикаций:</b> <code>{current}</code>\n\n"
+            "Установить: <code>/channel @username</code> или <code>/channel -5106639548</code>"
         )
         return
     value = parts[1].strip()
     if not (
         (value.startswith("@") and re.fullmatch(r"@[a-zA-Z0-9_]{5,32}", value))
-        or (value.startswith("-100") and value[1:].isdigit())
+        or (value.startswith("-") and value[1:].isdigit())
     ):
-        await message.answer("Укажи @username канала либо числовой ID вида -100...")
+        await message.answer("Укажи @username или отрицательный числовой ID группы/канала.")
         return
-    target = int(value) if value.startswith("-100") else value
+    target = int(value) if value.startswith("-") else value
     try:
         ch = await bot.get_chat(target)
         member = await bot.get_chat_member(ch.id, (await bot.get_me()).id)
-        if (
-            ch.type != "channel"
-            or member.status not in ("administrator", "creator")
-            or not getattr(member, "can_post_messages", False)
-        ):
-            await message.answer("Добавь бота администратором канала с правом публикации.")
+        if ch.type == "channel":
+            can_publish = (
+                member.status in ("administrator", "creator")
+                and bool(getattr(member, "can_post_messages", False))
+            )
+            if not can_publish:
+                await message.answer("Добавь бота администратором канала с правом публикации.")
+                return
+        elif ch.type in ("group", "supergroup"):
+            can_send = member.status in ("administrator", "creator", "member") or (
+                member.status == "restricted"
+                and bool(getattr(member, "is_member", False))
+                and bool(getattr(member, "can_send_messages", False))
+            )
+            if not can_send:
+                await message.answer("Добавь бота в группу и разреши ему отправлять сообщения.")
+                return
+        else:
+            await message.answer("Можно подключить только группу, супергруппу или канал.")
             return
     except TelegramAPIError:
-        await message.answer("Не могу получить доступ к каналу. Проверь права бота и адрес.")
+        await message.answer("Не могу получить доступ к чату. Добавь туда бота и проверь ID.")
         return
     db.set_setting("channel_id", str(ch.id))
     await message.answer(
-        f"{glyph('ok')} Канал подключён: <b>{html.escape(ch.title or str(ch.id))}</b>."
+        f"{glyph('ok')} Чат подключён: <b>{html.escape(ch.title or str(ch.id))}</b>."
     )
 
 
@@ -729,9 +745,9 @@ async def moderate(callback: CallbackQuery, bot: Bot) -> None:
         return
 
     if action == "yes":
-        target = channel_id()
+        target = destination_chat_id()
         if not target:
-            await callback.answer("Сначала подключи канал: /channel", show_alert=True)
+            await callback.answer("Сначала подключи чат: /channel", show_alert=True)
             return
         if not db.move(sub_id, "pending", "publishing"):
             await callback.answer("Уже обрабатывается.")
@@ -820,7 +836,7 @@ async def main() -> None:
         await configure_commands(bot)
         await load_pack(bot)
         recovery_job = asyncio.create_task(recover(bot))
-        logger.info("Started. Admins %s; channel %s", ADMIN_IDS, channel_id())
+        logger.info("Started. Admins %s; publication destination %s", ADMIN_IDS, destination_chat_id())
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
         if "recovery_job" in locals():
