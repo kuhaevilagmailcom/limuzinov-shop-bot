@@ -1111,7 +1111,7 @@ async def moderate(callback: CallbackQuery, bot: Bot) -> None:
             await callback.answer("Заявка уже обрабатывается.")
             return
         new_status = "rejected"
-        notice = f"{ce('ban')} Твоё предложение не принято."
+        notice = f"{ce('cross')} Твоё предложение не принято."
         toast = "Отклонено"
     elif action == "block":
         if not db.move(sub_id, "pending", "blocked"):
