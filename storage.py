@@ -29,6 +29,9 @@ class Storage:
                 submission_id INTEGER NOT NULL REFERENCES submissions(id),
                 user_id INTEGER NOT NULL,
                 message_id INTEGER NOT NULL,
+                content_type TEXT NOT NULL DEFAULT '',
+                content_text TEXT NOT NULL DEFAULT '',
+                entities_json TEXT NOT NULL DEFAULT '[]',
                 PRIMARY KEY (user_id, message_id)
             );
             CREATE INDEX IF NOT EXISTS items_sub_id_idx ON items(submission_id);
@@ -51,6 +54,14 @@ class Storage:
         if "quote_text" not in columns:
             self.conn.execute("ALTER TABLE submissions ADD COLUMN quote_text TEXT NOT NULL DEFAULT ''")
 
+        item_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(items)")}
+        if "content_type" not in item_columns:
+            self.conn.execute("ALTER TABLE items ADD COLUMN content_type TEXT NOT NULL DEFAULT ''")
+        if "content_text" not in item_columns:
+            self.conn.execute("ALTER TABLE items ADD COLUMN content_text TEXT NOT NULL DEFAULT ''")
+        if "entities_json" not in item_columns:
+            self.conn.execute("ALTER TABLE items ADD COLUMN entities_json TEXT NOT NULL DEFAULT '[]'")
+
     def add(
         self,
         *,
@@ -60,6 +71,9 @@ class Storage:
         message_id: int,
         album_key: str | None,
         quote_text: str = "",
+        content_type: str = "",
+        content_text: str = "",
+        entities_json: str = "[]",
     ) -> tuple[int, bool]:
         """Add a message and return (submission id, newly created submission)."""
         with self.conn:
@@ -95,8 +109,17 @@ class Storage:
                 submission_id, fresh = int(cur.lastrowid), True
 
             self.conn.execute(
-                "INSERT INTO items(submission_id,user_id,message_id) VALUES (?,?,?)",
-                (submission_id, user_id, message_id),
+                "INSERT INTO items("
+                "submission_id,user_id,message_id,content_type,content_text,entities_json"
+                ") VALUES (?,?,?,?,?,?)",
+                (
+                    submission_id,
+                    user_id,
+                    message_id,
+                    content_type,
+                    content_text,
+                    entities_json,
+                ),
             )
             if quote_text and quote_text.strip():
                 self.conn.execute(
@@ -119,6 +142,14 @@ class Storage:
                 (submission_id,),
             )
         ]
+
+    def items_for_submission(self, submission_id: int) -> list[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                "SELECT * FROM items WHERE submission_id=? ORDER BY message_id ASC",
+                (submission_id,),
+            )
+        )
 
     def move(self, submission_id: int, from_status: str, to_status: str) -> bool:
         with self.conn:
