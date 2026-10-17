@@ -436,12 +436,26 @@ def moderation_footer(sub, status: str) -> str:
     username = f"@{sub['username']}" if sub["username"] else "без username"
     name = sub["full_name"] or "Не указано"
     status_text = STATUS_TEXT.get(status, f"{ce('info')} Заявка обработана")
+    decision_labels = {
+        "published": "Принял",
+        "rejected": "Отклонил",
+        "blocked": "Заблокировал",
+    }
+    decision_line = ""
+    decision_label = decision_labels.get(status)
+    reviewer_id = sub["reviewed_by_id"]
+    reviewer_name = sub["reviewed_by_name"]
+    if decision_label and reviewer_id and reviewer_name:
+        decision_line = (
+            f"\n{ce('profile')} {decision_label}: {reviewer_name} · ID {reviewer_id}"
+        )
     return (
         "━━━━━━━━━━━━━━\n"
         f"{ce('profile')} Отправитель: {username} · ID {sub['user_id']}\n"
         f"{ce('profile')} Имя: {name}\n"
         f"{ce('timer')} Отправлено: {sent_at(sub['created_at'])}\n"
         f"{status_text}"
+        f"{decision_line}"
     )
 
 
@@ -1078,11 +1092,9 @@ async def update_moderation_card(bot: Bot, sub, status: str) -> None:
             exc,
         )
 
-    # Some Telegram message types (stickers, round videos, etc.) have no editable
-    # text/caption. Keep the status on the same message's inline keyboard instead.
+    # Stickers, round videos and other non-editable messages cannot hold a status footer.
+    # Remove the old buttons and post the decision as a reply, including the moderator identity.
     try:
-        # Processed cards should have no inline keyboard at all.
-        # Only pending submissions retain moderation controls.
         fallback = markup if status == "pending" else None
         await safe_edit_reply_markup(
             bot,
@@ -1092,6 +1104,38 @@ async def update_moderation_card(bot: Bot, sub, status: str) -> None:
         )
     except TelegramAPIError as exc:
         logger.warning("Could not update moderation buttons for submission %s: %s", sub["id"], exc)
+
+    if status != "pending":
+        decision_labels = {
+            "published": "Принял",
+            "rejected": "Отклонил",
+            "blocked": "Заблокировал",
+        }
+        decision_label = decision_labels.get(status)
+        reviewer_id = sub["reviewed_by_id"]
+        reviewer_name = sub["reviewed_by_name"]
+        decision_line = (
+            f"\n{ce('profile')} {decision_label}: {reviewer_name} · ID {reviewer_id}"
+            if decision_label and reviewer_id and reviewer_name
+            else ""
+        )
+        status_text = STATUS_TEXT.get(status, f"{ce('info')} Заявка обработана")
+        try:
+            await safe_bot_send_message(
+                bot,
+                chat_id=target,
+                text=f"{status_text}{decision_line}",
+                reply_parameters=ReplyParameters(
+                    message_id=int(card_id),
+                    allow_sending_without_reply=True,
+                ),
+            )
+        except TelegramAPIError as exc:
+            logger.warning(
+                "Could not post decision details for submission %s: %s",
+                sub["id"],
+                exc,
+            )
 
 
 @router.callback_query(F.data.startswith("mod:"))
@@ -1223,19 +1267,37 @@ async def moderate(callback: CallbackQuery, bot: Bot) -> None:
             await callback.answer("Ошибка публикации. Проверь канал вручную.", show_alert=True)
             return
 
-        db.move(sub_id, "publishing", "published")
+        db.move(
+            sub_id,
+            "publishing",
+            "published",
+            reviewed_by_id=callback.from_user.id,
+            reviewed_by_name=callback.from_user.full_name,
+        )
         new_status = "published"
         notice = f"{ce('check')} Твоё предложение принято и опубликовано!"
         toast = "Принято"
     elif action == "no":
-        if not db.move(sub_id, "pending", "rejected"):
+        if not db.move(
+            sub_id,
+            "pending",
+            "rejected",
+            reviewed_by_id=callback.from_user.id,
+            reviewed_by_name=callback.from_user.full_name,
+        ):
             await callback.answer("Заявка уже обрабатывается.")
             return
         new_status = "rejected"
         notice = f"{ce('cross')} Твоё предложение не принято."
         toast = "Отклонено"
     elif action == "block":
-        if not db.move(sub_id, "pending", "blocked"):
+        if not db.move(
+            sub_id,
+            "pending",
+            "blocked",
+            reviewed_by_id=callback.from_user.id,
+            reviewed_by_name=callback.from_user.full_name,
+        ):
             await callback.answer("Заявка уже обрабатывается.")
             return
         db.block_user(sub["user_id"], callback.from_user.id)
