@@ -945,7 +945,7 @@ async def inbox(message: Message, bot: Bot) -> None:
 
 @router.message(F.chat.type.in_({"group", "supergroup"}))
 async def group_reply_handler(message: Message, bot: Bot) -> None:
-    # Ignore all group traffic except a reply to a bot's active answer prompt.
+    # Handle only replies to the active answer prompt or its submission card.
     if message.chat.id != moderation_chat_id() or not message.from_user:
         return
     session = reply_sessions.get(message.from_user.id)
