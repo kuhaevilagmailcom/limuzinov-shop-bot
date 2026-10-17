@@ -38,17 +38,17 @@ load_dotenv(ROOT / ".env")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 DB_PATH = os.getenv("DB_PATH", str(ROOT / "suggestions.sqlite3"))
 
+# Known moderation group ID from the existing deployment. Publication must be configured separately.
 REQUESTED_DEFAULT_CHAT_ID = "-5106639548"
 LEGACY_DEFAULT_CHAT_IDS = {"-1004422721133", "-1001358443115"}
 # These IDs are used only to remove obsolete private command menus from older versions.
 LEGACY_COMMAND_CHAT_IDS = (8798455134, 438672098)
-DESTINATION_ENV = os.getenv("DESTINATION_CHAT_ID", os.getenv("CHANNEL_ID", "")).strip()
-MODERATION_ENV = os.getenv("MODERATION_CHAT_ID", "").strip()
-DEFAULT_CHAT_ID = (
-    REQUESTED_DEFAULT_CHAT_ID
-    if not DESTINATION_ENV or DESTINATION_ENV in LEGACY_DEFAULT_CHAT_IDS
-    else DESTINATION_ENV
+# An empty DESTINATION_CHAT_ID must still allow the legacy CHANNEL_ID variable to work.
+DESTINATION_ENV = (
+    os.getenv("DESTINATION_CHAT_ID", "").strip()
+    or os.getenv("CHANNEL_ID", "").strip()
 )
+MODERATION_ENV = os.getenv("MODERATION_CHAT_ID", "").strip()
 TIMEZONE = os.getenv("TIMEZONE", "Europe/Riga")
 ALBUM_DELAY = 2.0
 REPLY_TIMEOUT = 15 * 60
@@ -73,25 +73,57 @@ def parse_chat_id(value: str | int | None) -> str | int | None:
 
 
 def destination_chat_value() -> str | int | None:
-    # An explicit environment value wins over an old value persisted in SQLite.
-    value = DESTINATION_ENV or db.get_setting("channel_id") or DEFAULT_CHAT_ID
-    if value in LEGACY_DEFAULT_CHAT_IDS and DEFAULT_CHAT_ID == REQUESTED_DEFAULT_CHAT_ID:
-        value = REQUESTED_DEFAULT_CHAT_ID
-        db.set_setting("channel_id", value)
+    # Explicit environment settings win. Never silently default publication to the moderation group.
+    value = DESTINATION_ENV or db.get_setting("channel_id")
+    if not value:
+        return None
+    # Ignore known old defaults from earlier versions when they came from SQLite.
+    if not DESTINATION_ENV and value in (LEGACY_DEFAULT_CHAT_IDS | {REQUESTED_DEFAULT_CHAT_ID}):
+        return None
     return parse_chat_id(value)
 
 
 def destination_chat_id() -> str | int | None:
-    return resolved_destination_chat_id or destination_chat_value()
+    return (
+        resolved_destination_chat_id
+        if resolved_destination_chat_id is not None
+        else destination_chat_value()
+    )
 
 
 def moderation_chat_value() -> str | int | None:
-    # If no separate moderation group is configured, use the destination chat.
-    return parse_chat_id(MODERATION_ENV) or destination_chat_value()
+    # Keep the known moderation group as the fallback; never derive moderation from publication.
+    configured = parse_chat_id(MODERATION_ENV)
+    default_group = parse_chat_id(REQUESTED_DEFAULT_CHAT_ID)
+    destination = destination_chat_value()
+    # Recover automatically if a stale environment value points moderation at the publication chat.
+    if configured is not None and same_chat(configured, destination) and not same_chat(default_group, destination):
+        logger.warning(
+            "MODERATION_CHAT_ID matches the publication chat; using the known moderation group ID %s. "
+            "Set MODERATION_CHAT_ID explicitly to override this fallback.",
+            default_group,
+        )
+        return default_group
+    return configured if configured is not None else default_group
 
 
 def moderation_chat_id() -> str | int | None:
-    return resolved_moderation_chat_id or moderation_chat_value()
+    return (
+        resolved_moderation_chat_id
+        if resolved_moderation_chat_id is not None
+        else moderation_chat_value()
+    )
+
+
+def destination_config_source() -> str:
+    if os.getenv("DESTINATION_CHAT_ID", "").strip():
+        return "DESTINATION_CHAT_ID"
+    if os.getenv("CHANNEL_ID", "").strip():
+        return "CHANNEL_ID"
+    saved = db.get_setting("channel_id")
+    if saved:
+        return "SQLite (устаревшее сохранённое значение)" if saved in (LEGACY_DEFAULT_CHAT_IDS | {REQUESTED_DEFAULT_CHAT_ID}) else "SQLite"
+    return "не задан"
 
 
 def same_chat(first: str | int | None, second: str | int | None) -> bool:
@@ -101,6 +133,9 @@ def same_chat(first: str | int | None, second: str | int | None) -> bool:
 async def resolve_configured_chats(bot: Bot) -> None:
     global resolved_destination_chat_id, resolved_moderation_chat_id
 
+    # Reset first so failed lookups cannot leave stale IDs during reconfiguration/tests.
+    resolved_destination_chat_id = None
+    resolved_moderation_chat_id = None
     destination = destination_chat_value()
     moderation = moderation_chat_value()
     if destination is not None:
@@ -460,9 +495,15 @@ async def start(message: Message) -> None:
 
 @router.message(Command("id"), F.chat.type.in_({"group", "supergroup"}))
 async def chat_id_command(message: Message) -> None:
+    moderation_value = moderation_chat_id()
+    destination_value = destination_chat_id()
     await message.answer(
         f"ID этого чата: <code>{message.chat.id}</code>\n"
-        "Скопируй его без изменений в переменные окружения BotHost."
+        f"MODERATION_CHAT_ID в окружении: <code>{html.escape(MODERATION_ENV or '(пусто)')}</code>\n"
+        f"Эффективный ID модерации: <code>{html.escape(str(moderation_value) if moderation_value is not None else 'НЕ ЗАДАН')}</code>\n"
+        f"DESTINATION_CHAT_ID / CHANNEL_ID: <code>{html.escape(DESTINATION_ENV or '(пусто)')}</code>\n"
+        f"Эффективный ID публикации: <code>{html.escape(str(destination_value) if destination_value is not None else 'НЕ ЗАДАН')}</code>\n"
+        f"Источник публикации: <code>{html.escape(destination_config_source())}</code>"
     )
 
 
@@ -828,17 +869,28 @@ async def main() -> None:
         me = await bot.get_me()
         await resolve_configured_chats(bot)
         await configure_commands(bot)
+        if destination_chat_id() is None:
+            logger.error(
+                "CONFIG ERROR: publication chat is not configured. Set DESTINATION_CHAT_ID "
+                "(or CHANNEL_ID) to the separate channel ID or @username."
+            )
         if same_chat(moderation_chat_id(), destination_chat_id()):
             logger.error(
-                "CONFIG ERROR: moderation group and publication chat are identical (%s). "
-                "Set MODERATION_CHAT_ID to the group and DESTINATION_CHAT_ID to the separate channel.",
+                "CONFIG ERROR: moderation group and publication chat resolve to the same ID (%s). "
+                "Runtime values: MODERATION_CHAT_ID=%r, DESTINATION_CHAT_ID/CHANNEL_ID=%r, "
+                "publication source=%s.",
                 moderation_chat_id(),
+                MODERATION_ENV or "(empty; known group fallback)",
+                DESTINATION_ENV or "(empty)",
+                destination_config_source(),
             )
         logger.info(
-            "Started as @%s. Moderation group: %s. Publication chat: %s",
+            "Started as @%s. Moderation group: %s (env=%r). Publication chat: %s (source=%s).",
             me.username,
             moderation_chat_id(),
+            MODERATION_ENV or f"fallback:{REQUESTED_DEFAULT_CHAT_ID}",
             destination_chat_id(),
+            destination_config_source(),
         )
         recovery_job = asyncio.create_task(recover(bot))
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
