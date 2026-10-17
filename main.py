@@ -56,10 +56,9 @@ REPLY_TIMEOUT = 15 * 60
 
 PUBLICATION_DISCLAIMER = (
     "This channel fully complies with all platform rules and community guidelines. "
-    "Content is intended for legal and acceptable use only.\n\n"
-    "Attention: We strictly comply with laws and ethical standards. All information is provided solely "
-    "for research and educational purposes. We do not encourage or carry out unauthorized collection "
-    "or dissemination of personal data."
+    "Content is intended for legal and acceptable use only Attention: We strictly comply with laws and ethical standards. "
+    "All information is provided solely for research and educational purposes. We do not encourage or carry out unauthorized collection "
+    "or dissemination of personal data"
 )
 
 logger = logging.getLogger("college_suggest")
@@ -954,7 +953,12 @@ async def group_reply_handler(message: Message, bot: Bot) -> None:
         return
     prompt_id = int(session["prompt_message_id"])
     replied_to = message.reply_to_message
-    if not replied_to or replied_to.message_id != prompt_id:
+    # Accept a reply either to the bot's prompt or directly to the submission card.
+    active_sub = db.get(int(session["sub_id"]))
+    allowed_reply_ids = {prompt_id}
+    if active_sub and active_sub["admin_card_id"]:
+        allowed_reply_ids.add(int(active_sub["admin_card_id"]))
+    if not replied_to or replied_to.message_id not in allowed_reply_ids:
         return
 
     if asyncio.get_running_loop().time() >= float(session["deadline"]):
@@ -1162,7 +1166,7 @@ async def moderate(callback: CallbackQuery, bot: Bot) -> None:
             bot,
             chat_id=message.chat.id,
             text=(
-                f"{ce('chat')} <b>Ответь на это сообщение, чтобы отправить ответ пользователю.</b>\n"
+                f"{ce('chat')} <b>Ответь на это сообщение или прямо на карточку заявки, чтобы отправить ответ пользователю.</b>\n"
                 f"{ce('timer')} У тебя есть <b>15 минут</b>. Ответ придёт пользователю в личку с цитатой его предложения.\n\n"
                 f"<b>Исходное сообщение:</b>\n<blockquote>"
                 f"{html.escape(str(sub['quote_text'] or '[Сообщение]'))}</blockquote>"
@@ -1183,7 +1187,7 @@ async def moderate(callback: CallbackQuery, bot: Bot) -> None:
         reply_jobs[callback.from_user.id] = asyncio.create_task(
             expire_reply_session(bot, callback.from_user.id, sub_id, message.chat.id, prompt.message_id)
         )
-        await callback.answer("Ответ открыт. Ответь на сообщение бота в группе.")
+        await callback.answer("Ответ открыт. Ответь на подсказку бота или карточку заявки в группе.")
         return
 
     if action == "yes":
