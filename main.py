@@ -27,6 +27,7 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     MenuButtonCommands,
     Message,
+    ReplyParameters,
 )
 from dotenv import load_dotenv
 
@@ -391,37 +392,32 @@ async def expire_reply_session(
         )
 
 
-def reply_quote_intro(quote_text: str) -> str:
-    quoted = html.escape(quote_text or "[Сообщение]")
-    return f"💬 <b>Ответ администратора</b>\n\n<blockquote>{quoted}</blockquote>"
-
-
 async def deliver_admin_reply(bot: Bot, message: Message, session: dict[str, object]) -> None:
     target_user_id = int(session["user_id"])
-    source_quote = str(session.get("quote_text") or "[Сообщение]")
-    intro = reply_quote_intro(source_quote)
+    source_ids = db.message_ids(int(session["sub_id"]))
+    # The original submission is still in this user's private bot chat, so Telegram can
+    # display a native reply/quote automatically instead of sending a text imitation.
+    reply_parameters = (
+        ReplyParameters(message_id=source_ids[0], allow_sending_without_reply=True)
+        if source_ids else None
+    )
 
     if message.text is not None:
         escaped_reply = html.escape(message.text)
-        combined = f"{intro}\n\n{escaped_reply}"
-        # Keep room under Telegram's message limit even when HTML escaping expands text.
+        combined = f"💬 <b>Ответ администратора</b>\n\n{escaped_reply}"
+        # Copy very long text verbatim if adding the heading or escaping would exceed the limit.
         if len(combined) <= 3900:
-            await bot.send_message(target_user_id, combined)
-        else:
-            await bot.send_message(target_user_id, intro)
-            await bot.copy_message(
-                chat_id=target_user_id,
-                from_chat_id=message.chat.id,
-                message_id=message.message_id,
+            await bot.send_message(
+                target_user_id, combined, reply_parameters=reply_parameters
             )
-    else:
-        # For media and other message types, send the quote first and then copy the reply.
-        await bot.send_message(target_user_id, intro)
-        await bot.copy_message(
-            chat_id=target_user_id,
-            from_chat_id=message.chat.id,
-            message_id=message.message_id,
-        )
+            return
+
+    await bot.copy_message(
+        chat_id=target_user_id,
+        from_chat_id=message.chat.id,
+        message_id=message.message_id,
+        reply_parameters=reply_parameters,
+    )
 
 
 @router.message(CommandStart(), F.chat.type == "private")
@@ -582,7 +578,8 @@ async def update_moderation_cards(
     clicked_message: Message | None,
 ) -> None:
     cards = set(db.admin_cards(sub_id))
-    if sub["admin_card_id"]:
+    if sub["admin_card_id"] and not cards:
+        # Compatibility fallback for cards created before the multi-admin migration.
         cards.add((ADMIN_ID, sub["admin_card_id"]))
     if clicked_message:
         cards.add((clicked_message.chat.id, clicked_message.message_id))
