@@ -116,7 +116,12 @@ async def load_pack(bot: Bot) -> None:
 
 
 def channel_id() -> str | int | None:
-    value = db.get_setting("channel_id") or DEFAULT_CHANNEL_ID
+    value = db.get_setting("channel_id")
+    # Migrate the previous built-in default to the newly requested channel.
+    if value == "-1004422721133" and DEFAULT_CHANNEL_ID == "-1001358443115":
+        value = DEFAULT_CHANNEL_ID
+        db.set_setting("channel_id", value)
+    value = value or DEFAULT_CHANNEL_ID
     if not value:
         return None
     return int(value) if value.lstrip("-").isdigit() else value
