@@ -1,4 +1,4 @@
-"""SQLite storage for direct message publication."""
+"""SQLite storage for submissions, moderation state, and blocked users."""
 from __future__ import annotations
 
 import sqlite3
@@ -20,6 +20,8 @@ class Storage:
                 username TEXT,
                 album_key TEXT,
                 status TEXT NOT NULL DEFAULT 'collecting',
+                admin_card_id INTEGER,
+                quote_text TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 UNIQUE(user_id, album_key)
             );
@@ -35,7 +37,19 @@ class Storage:
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS blocked_users (
+                user_id INTEGER PRIMARY KEY,
+                blocked_by INTEGER NOT NULL,
+                blocked_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
         """)
+
+        # Add fields when opening databases made by the earlier direct-publication version.
+        columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(submissions)")}
+        if "admin_card_id" not in columns:
+            self.conn.execute("ALTER TABLE submissions ADD COLUMN admin_card_id INTEGER")
+        if "quote_text" not in columns:
+            self.conn.execute("ALTER TABLE submissions ADD COLUMN quote_text TEXT NOT NULL DEFAULT ''")
 
     def add(
         self,
@@ -45,11 +59,9 @@ class Storage:
         username: str | None,
         message_id: int,
         album_key: str | None,
+        quote_text: str = "",
     ) -> tuple[int, bool]:
-        """Add a message, returning (submission id, newly created submission).
-
-        For albums, multiple Telegram updates share one submission.
-        """
+        """Add a message and return (submission id, newly created submission)."""
         with self.conn:
             existed = self.conn.execute(
                 "SELECT submission_id FROM items WHERE user_id=? AND message_id=?",
@@ -66,27 +78,33 @@ class Storage:
                 if existing:
                     if existing["status"] != "collecting":
                         raise ValueError("Media group was already submitted")
-                    submission_id, fresh = existing["id"], False
+                    submission_id, fresh = int(existing["id"]), False
                 else:
                     cur = self.conn.execute(
-                        "INSERT INTO submissions(user_id,full_name,username,album_key) "
-                        "VALUES (?,?,?,?)",
-                        (user_id, full_name, username, album_key),
+                        "INSERT INTO submissions(user_id,full_name,username,album_key,quote_text) "
+                        "VALUES (?,?,?,?,?)",
+                        (user_id, full_name, username, album_key, quote_text),
                     )
-                    submission_id, fresh = cur.lastrowid, True
+                    submission_id, fresh = int(cur.lastrowid), True
             else:
                 cur = self.conn.execute(
-                    "INSERT INTO submissions(user_id,full_name,username,album_key) "
-                    "VALUES (?,?,?,NULL)",
-                    (user_id, full_name, username),
+                    "INSERT INTO submissions(user_id,full_name,username,album_key,quote_text) "
+                    "VALUES (?,?,?,NULL,?)",
+                    (user_id, full_name, username, quote_text),
                 )
-                submission_id, fresh = cur.lastrowid, True
+                submission_id, fresh = int(cur.lastrowid), True
 
             self.conn.execute(
                 "INSERT INTO items(submission_id,user_id,message_id) VALUES (?,?,?)",
                 (submission_id, user_id, message_id),
             )
-            return int(submission_id), fresh
+            if quote_text and quote_text.strip():
+                self.conn.execute(
+                    "UPDATE submissions SET quote_text=? "
+                    "WHERE id=? AND (quote_text='' OR quote_text LIKE '[%')",
+                    (quote_text, submission_id),
+                )
+            return submission_id, fresh
 
     def get(self, submission_id: int) -> sqlite3.Row | None:
         return self.conn.execute(
@@ -95,7 +113,7 @@ class Storage:
 
     def message_ids(self, submission_id: int) -> list[int]:
         return [
-            row["message_id"]
+            int(row["message_id"])
             for row in self.conn.execute(
                 "SELECT message_id FROM items WHERE submission_id=? ORDER BY message_id ASC",
                 (submission_id,),
@@ -110,11 +128,41 @@ class Storage:
             )
             return cur.rowcount == 1
 
+    def set_card_pending(self, submission_id: int, card_id: int) -> None:
+        with self.conn:
+            self.conn.execute(
+                "UPDATE submissions SET admin_card_id=?, "
+                "status=CASE WHEN status='notifying' THEN 'pending' ELSE status END "
+                "WHERE id=?",
+                (card_id, submission_id),
+            )
+
+    def is_blocked(self, user_id: int) -> bool:
+        return self.conn.execute(
+            "SELECT 1 FROM blocked_users WHERE user_id=?", (user_id,)
+        ).fetchone() is not None
+
+    def block_user(self, user_id: int, blocked_by: int) -> None:
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO blocked_users(user_id,blocked_by) VALUES (?,?) "
+                "ON CONFLICT(user_id) DO UPDATE SET blocked_by=excluded.blocked_by, "
+                "blocked_at=datetime('now')",
+                (user_id, blocked_by),
+            )
+
+    def unblock_user(self, user_id: int) -> bool:
+        with self.conn:
+            cur = self.conn.execute(
+                "DELETE FROM blocked_users WHERE user_id=?", (user_id,)
+            )
+            return cur.rowcount == 1
+
     def get_setting(self, key: str) -> str | None:
         row = self.conn.execute(
             "SELECT value FROM settings WHERE key=?", (key,)
         ).fetchone()
-        return row["value"] if row else None
+        return str(row["value"]) if row else None
 
     def set_setting(self, key: str, value: str) -> None:
         with self.conn:
@@ -126,7 +174,7 @@ class Storage:
 
     def recoverable_ids(self) -> list[int]:
         return [
-            row["id"]
+            int(row["id"])
             for row in self.conn.execute(
                 "SELECT id FROM submissions WHERE status='collecting' ORDER BY id ASC"
             )
