@@ -802,8 +802,8 @@ async def send_to_moderation_group(bot: Bot, sub_id: int) -> None:
         )
         return
 
-    # Normally each copied item is its own moderation surface. If Telegram rejects
-    # a keyboard on any item, a separate text control card is used as a reliable fallback.
+    # Single messages use their own buttons. Albums and keyboard failures get a separate
+    # control card so moderation actions remain accessible in every Telegram client.
     card_id = fallback_card_id or copied_ids[0]
     card_mode = (
         "album_control" if len(db.items_for_submission(sub_id)) > 1
@@ -1485,7 +1485,7 @@ async def cleanup_processed_inline_keyboards(bot: Bot) -> None:
 
     # Revisit old processed cards once because the previous cleanup marked some
     # keyboards as cleaned even when Telegram rejected the edit.
-    db.prepare_keyboard_cleanup_version("3")
+    db.prepare_keyboard_cleanup_version("4")
     cards = db.cards_needing_keyboard_cleanup()
     if not cards:
         logger.info("Inline keyboard cleanup: no cards need checking.")
@@ -1499,6 +1499,40 @@ async def cleanup_processed_inline_keyboards(bot: Bot) -> None:
         if not sub:
             continue
         status = str(sub["status"])
+        card_mode = str(sub["admin_card_mode"] or "content")
+        is_album = len(db.items_for_submission(submission_id)) > 1
+
+        # Migrate older pending albums: create the reliable control card once even if
+        # Telegram reports that some item-level keyboard edits succeeded.
+        if status == "pending" and is_album and card_mode not in {"control", "album_control"}:
+            try:
+                preview = html.escape(str(sub["quote_text"] or "[Сообщение]")[:700])
+                control_text = (
+                    f"{moderation_footer(sub, 'pending', html_safe=True)}\n\n"
+                    f"{ce('info')} Контент заявки: {preview}"
+                )
+                control_card = await safe_bot_send_message(
+                    bot,
+                    chat_id=target,
+                    text=control_text,
+                    reply_markup=buttons(submission_id),
+                    reply_parameters=ReplyParameters(
+                        message_id=int(sub["admin_card_id"]),
+                        allow_sending_without_reply=True,
+                    ),
+                )
+                if not db.moderation_message_ids(submission_id):
+                    db.remember_primary_moderation_message_id(
+                        submission_id, int(sub["admin_card_id"])
+                    )
+                db.set_card_pending(submission_id, control_card.message_id, "album_control")
+                sub = db.get(submission_id) or sub
+            except TelegramAPIError as exc:
+                logger.warning(
+                    "Could not migrate pending album %s to a control card: %s",
+                    submission_id, exc,
+                )
+
         success = await refresh_submission_keyboards(bot, sub, status)
         if (
             not success
