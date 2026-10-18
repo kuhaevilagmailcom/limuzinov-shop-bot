@@ -236,6 +236,21 @@ class Storage:
             )
         ]
 
+    def remember_primary_moderation_message_id(
+        self, submission_id: int, moderation_message_id: int
+    ) -> None:
+        row = self.conn.execute(
+            "SELECT message_id FROM items WHERE submission_id=? ORDER BY message_id ASC LIMIT 1",
+            (submission_id,),
+        ).fetchone()
+        if row:
+            with self.conn:
+                self.conn.execute(
+                    "UPDATE items SET moderation_message_id=? "
+                    "WHERE submission_id=? AND message_id=?",
+                    (moderation_message_id, submission_id, int(row["message_id"])),
+                )
+
     def is_blocked(self, user_id: int) -> bool:
         return self.conn.execute(
             "SELECT 1 FROM blocked_users WHERE user_id=?", (user_id,)
