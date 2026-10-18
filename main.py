@@ -352,20 +352,9 @@ async def refresh_submission_keyboards(bot: Bot, sub, status: str) -> bool:
 
     success = True
     if card_mode == "control":
-        # The fallback control card owns the buttons; copied content messages stay clean.
+        # Keep keyboards on every content item; the control card is only a fallback.
         targets = [int(card_id)]
-        if status == "pending":
-            for message_id in content_ids:
-                try:
-                    await safe_edit_reply_markup(bot, target, message_id, None)
-                except TelegramAPIError as exc:
-                    success = False
-                    logger.warning(
-                        "Could not clear content keyboard for submission %s / message %s: %s",
-                        submission_id, message_id, exc,
-                    )
-        else:
-            targets.extend(message_id for message_id in content_ids if message_id != int(card_id))
+        targets.extend(content_ids)
     else:
         targets = list(content_ids)
         if int(card_id) not in targets:
@@ -730,6 +719,7 @@ async def copy_submission(
     if moderation_controls:
         db.set_moderation_message_ids(sub_id, copied_ids)
         attached = True
+        failed_message_ids: list[int] = []
         for message_id in copied_ids:
             try:
                 await safe_edit_reply_markup(
@@ -740,23 +730,15 @@ async def copy_submission(
                 )
             except TelegramAPIError as exc:
                 attached = False
+                failed_message_ids.append(message_id)
                 logger.warning(
                     "Could not attach moderation buttons to submission %s / message %s: %s",
                     sub_id, message_id, exc,
                 )
 
         if not attached:
-            # If even one album item rejects an inline keyboard, use one reliable text control card.
-            for message_id in copied_ids:
-                try:
-                    await safe_edit_reply_markup(
-                        bot, chat_id=destination, message_id=message_id, markup=None
-                    )
-                except TelegramAPIError as exc:
-                    logger.warning(
-                        "Could not clear partial moderation keyboard for submission %s / message %s: %s",
-                        sub_id, message_id, exc,
-                    )
+            # Never clear keyboards that were attached successfully. Add a control card
+            # as a fallback for the item whose inline keyboard Telegram rejected.
             preview = html.escape(str(sub["quote_text"] or "[Сообщение]")[:700])
             control_text = (
                 f"{moderation_footer(sub, 'pending', html_safe=True)}\n\n"
@@ -768,7 +750,7 @@ async def copy_submission(
                 text=control_text,
                 reply_markup=buttons(sub_id),
                 reply_parameters=ReplyParameters(
-                    message_id=copied_ids[0],
+                    message_id=(failed_message_ids[0] if failed_message_ids else copied_ids[0]),
                     allow_sending_without_reply=True,
                 ),
             )
@@ -858,7 +840,7 @@ async def configure_commands(bot: Bot) -> None:
                 [
                     BotCommand(command="unblock", description="Разблокировать пользователя"),
                     BotCommand(command="id", description="Показать ID этого чата"),
-                    BotCommand(command="cleanbuttons", description="Убрать старые кнопки с поста канала"),
+                    BotCommand(command="cleanbuttons", description="Убрать старые кнопки с сообщения"),
                 ],
                 scope=BotCommandScopeChat(chat_id=moderation_id),
             )
@@ -992,18 +974,22 @@ async def unblock_command(message: Message) -> None:
 async def cleanbuttons_command(message: Message, bot: Bot) -> None:
     if message.chat.id != moderation_chat_id():
         return
-    target = destination_chat_id()
-    if target is None:
-        await message.answer("Не настроен канал публикации. Проверь DESTINATION_CHAT_ID.")
-        return
     parts = (message.text or "").split(maxsplit=1)
-    if len(parts) != 2 or not parts[1].strip().isdigit():
+    if message.reply_to_message:
+        target = message.chat.id
+        post_id = message.reply_to_message.message_id
+    elif len(parts) == 2 and parts[1].strip().isdigit():
+        target = destination_chat_id()
+        if target is None:
+            await message.answer("Не настроен канал публикации. Проверь DESTINATION_CHAT_ID.")
+            return
+        post_id = int(parts[1].strip())
+    else:
         await message.answer(
-            "Используй: <code>/cleanbuttons POST_ID</code>\n"
-            "POST_ID — число в конце ссылки на старый пост в канале."
+            "Чтобы убрать кнопку с сообщения в этой группе, ответь на него командой /cleanbuttons.\n"
+            "Для поста в канале используй <code>/cleanbuttons POST_ID</code>."
         )
         return
-    post_id = int(parts[1].strip())
     try:
         await safe_edit_reply_markup(bot, target, post_id, None)
     except TelegramAPIError as exc:
@@ -1186,7 +1172,7 @@ async def update_moderation_card(bot: Bot, sub, status: str) -> None:
                         text=combined,
                         entities=entities or None,
                         parse_mode=None,
-                        reply_markup=None,
+                        reply_markup=markup,
                     )
                 else:
                     await bot.edit_message_caption(
@@ -1195,7 +1181,7 @@ async def update_moderation_card(bot: Bot, sub, status: str) -> None:
                         caption=combined,
                         caption_entities=entities or None,
                         parse_mode=None,
-                        reply_markup=None,
+                        reply_markup=markup,
                     )
                 updated = True
             except TelegramBadRequest as exc:
@@ -1214,7 +1200,7 @@ async def update_moderation_card(bot: Bot, sub, status: str) -> None:
                             text=strip_custom_emoji_markup(combined),
                             entities=fallback_entities or None,
                             parse_mode=None,
-                            reply_markup=None,
+                            reply_markup=markup,
                         )
                     else:
                         await bot.edit_message_caption(
@@ -1223,7 +1209,7 @@ async def update_moderation_card(bot: Bot, sub, status: str) -> None:
                             caption=strip_custom_emoji_markup(combined),
                             caption_entities=fallback_entities or None,
                             parse_mode=None,
-                            reply_markup=None,
+                            reply_markup=markup,
                         )
                     updated = True
                 except TelegramAPIError as fallback_exc:
@@ -1309,7 +1295,10 @@ async def moderate(callback: CallbackQuery, bot: Bot) -> None:
     if not sub:
         await callback.answer("Заявка не найдена.", show_alert=True)
         return
-    if message.message_id != sub["admin_card_id"]:
+    allowed_message_ids = set(db.moderation_message_ids(sub_id))
+    if sub["admin_card_id"]:
+        allowed_message_ids.add(int(sub["admin_card_id"]))
+    if message.message_id not in allowed_message_ids:
         await callback.answer("Эта кнопка не относится к карточке заявки.", show_alert=True)
         return
     if action == "status":
@@ -1457,7 +1446,7 @@ async def cleanup_processed_inline_keyboards(bot: Bot) -> None:
 
     # Revisit old processed cards once because the previous cleanup marked some
     # keyboards as cleaned even when Telegram rejected the edit.
-    db.prepare_keyboard_cleanup_version("2")
+    db.prepare_keyboard_cleanup_version("3")
     cards = db.cards_needing_keyboard_cleanup()
     if not cards:
         logger.info("Inline keyboard cleanup: no cards need checking.")
