@@ -1426,6 +1426,9 @@ async def cleanup_processed_inline_keyboards(bot: Bot) -> None:
     if target is None:
         return
 
+    # Revisit old processed cards once because the previous cleanup marked some
+    # keyboards as cleaned even when Telegram rejected the edit.
+    db.prepare_keyboard_cleanup_version("2")
     cards = db.cards_needing_keyboard_cleanup()
     if not cards:
         logger.info("Inline keyboard cleanup: no cards need checking.")
