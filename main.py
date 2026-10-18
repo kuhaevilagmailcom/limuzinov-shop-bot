@@ -1132,9 +1132,9 @@ async def help_command(message: Message, bot: Bot) -> None:
         message,
         "ℹ️ <b>Команды группы модерации</b>\n\n"
         "/top — рейтинг модераторов и статистика публикаций\n"
-        "/users — список пользователей с ником и ID <i>(только администраторы)</i>\n"
+        "/users — список пользователей с ником и ID\n"
         "/done ТЕКСТ — рассылка всем пользователям; также можно ответить командой /done на сообщение "
-        "и разослать его <i>(только администраторы)</i>\n"
+        "и разослать его (после подтверждения)\n"
         "/unblock USER_ID — снять блокировку\n"
         "/cleanbuttons — убрать кнопки с сообщения, на которое ответили; "
         "/cleanbuttons POST_ID — убрать кнопки в канале\n"
@@ -1146,8 +1146,7 @@ async def help_command(message: Message, bot: Bot) -> None:
 async def users_command(message: Message, bot: Bot) -> None:
     if message.chat.id != moderation_chat_id():
         return
-    if not message.from_user or not await is_moderation_admin(bot, message.from_user.id):
-        await message.answer("Эта команда доступна только администраторам группы модерации.")
+    if not message.from_user:
         return
     total = db.user_count()
     await safe_answer(
@@ -1161,8 +1160,7 @@ async def users_command(message: Message, bot: Bot) -> None:
 async def done_command(message: Message, bot: Bot) -> None:
     if message.chat.id != moderation_chat_id():
         return
-    if not message.from_user or not await is_moderation_admin(bot, message.from_user.id):
-        await message.answer("Эта команда доступна только администраторам группы модерации.")
+    if not message.from_user:
         return
 
     parts = (message.text or "").split(maxsplit=1)
@@ -1582,9 +1580,6 @@ async def users_pagination_callback(callback: CallbackQuery, bot: Bot) -> None:
     if not message or message.chat.id != moderation_chat_id():
         await callback.answer("Список доступен только в группе модерации.", show_alert=True)
         return
-    if not await is_moderation_admin(bot, callback.from_user.id):
-        await callback.answer("Только администраторы группы могут просматривать список.", show_alert=True)
-        return
     try:
         _, action, raw_offset = (callback.data or "").split(":")
         if action != "page":
@@ -1614,9 +1609,6 @@ async def broadcast_callback(callback: CallbackQuery, bot: Bot) -> None:
     message = callback.message
     if not message or message.chat.id != moderation_chat_id():
         await callback.answer("Рассылка доступна только в группе модерации.", show_alert=True)
-        return
-    if not await is_moderation_admin(bot, callback.from_user.id):
-        await callback.answer("Только администратор группы может управлять рассылкой.", show_alert=True)
         return
     session = broadcast_sessions.get(callback.from_user.id)
     if not session or int(session.get("confirm_message_id", 0)) != message.message_id:
