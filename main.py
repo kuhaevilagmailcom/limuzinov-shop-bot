@@ -1457,6 +1457,10 @@ async def cleanup_processed_inline_keyboards(bot: Bot) -> None:
                         allow_sending_without_reply=True,
                     ),
                 )
+                if not db.moderation_message_ids(submission_id):
+                    db.remember_primary_moderation_message_id(
+                        submission_id, int(sub["admin_card_id"])
+                    )
                 db.set_card_pending(submission_id, control_card.message_id, "control")
                 refreshed_sub = db.get(submission_id)
                 if refreshed_sub:
