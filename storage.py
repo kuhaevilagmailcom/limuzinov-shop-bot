@@ -297,11 +297,41 @@ class Storage:
                 (int(user_id), username, name),
             )
 
+    def sync_known_users(self) -> None:
+        """Rebuild the recipient registry from every user still present in this database."""
+        with self.conn:
+            self.conn.execute("""
+                INSERT OR IGNORE INTO bot_users(
+                    user_id, username, full_name, first_seen_at, last_seen_at
+                )
+                SELECT user_id, MAX(username), COALESCE(MAX(full_name), 'Пользователь'),
+                       MIN(created_at), MAX(created_at)
+                FROM submissions
+                GROUP BY user_id
+            """)
+            self.conn.execute("""
+                INSERT OR IGNORE INTO bot_users(user_id, full_name)
+                SELECT user_id, 'Пользователь' FROM items
+                GROUP BY user_id
+            """)
+            self.conn.execute("""
+                INSERT OR IGNORE INTO bot_users(user_id, full_name)
+                SELECT user_id, 'Пользователь' FROM blocked_users
+            """)
+
+    def known_submission_user_count(self) -> int:
+        row = self.conn.execute(
+            "SELECT COUNT(DISTINCT user_id) AS total FROM submissions"
+        ).fetchone()
+        return int(row["total"] or 0)
+
     def user_count(self) -> int:
+        self.sync_known_users()
         row = self.conn.execute("SELECT COUNT(*) AS total FROM bot_users").fetchone()
         return int(row["total"] or 0)
 
     def list_users(self, offset: int = 0, limit: int = 10) -> list[sqlite3.Row]:
+        self.sync_known_users()
         offset = max(0, int(offset))
         limit = max(1, min(int(limit), 20))
         return list(
@@ -317,6 +347,7 @@ class Storage:
         )
 
     def all_user_ids(self) -> list[int]:
+        self.sync_known_users()
         return [
             int(row["user_id"])
             for row in self.conn.execute("SELECT user_id FROM bot_users ORDER BY user_id")
