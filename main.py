@@ -197,7 +197,7 @@ def publication_window_starts() -> dict[str, str]:
     """Return local-day, rolling-seven-day and local-month starts as UTC SQLite timestamps."""
     try:
         tz = ZoneInfo(TIMEZONE)
-    except ZoneInfoNotFoundError:
+    except (ZoneInfoNotFoundError, ValueError):
         logger.warning("Unknown TIMEZONE %r; publication statistics will use UTC", TIMEZONE)
         tz = timezone.utc
     now_local = datetime.now(tz)
