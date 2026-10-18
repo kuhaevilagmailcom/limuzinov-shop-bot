@@ -139,6 +139,44 @@ def same_chat(first: str | int | None, second: str | int | None) -> bool:
     return first is not None and second is not None and str(first) == str(second)
 
 
+async def moderation_group_membership(bot: Bot, user_id: int) -> bool | None:
+    """Return True/False for group membership, or None if Telegram cannot verify it."""
+    group_id = moderation_chat_id()
+    if group_id is None:
+        logger.warning("Cannot verify moderation-group membership: group ID is not configured")
+        return None
+    try:
+        member = await bot.get_chat_member(chat_id=group_id, user_id=user_id)
+    except TelegramAPIError as exc:
+        logger.warning(
+            "Could not verify moderation-group membership for user %s: %s",
+            user_id, exc,
+        )
+        return None
+
+    status = getattr(member.status, "value", member.status)
+    if status in {"creator", "administrator", "member"}:
+        return True
+    if status == "restricted":
+        return bool(getattr(member, "is_member", False))
+    return False
+
+
+async def is_blocked_from_suggestions(bot: Bot, user_id: int) -> bool:
+    """Never keep a confirmed moderation-group member blocked from the suggestion inbox."""
+    if not db.is_blocked(user_id):
+        return False
+    membership = await moderation_group_membership(bot, user_id)
+    if membership is True:
+        db.unblock_user(user_id)
+        logger.warning(
+            "Automatically unblocked moderation-group member %s from the suggestion inbox",
+            user_id,
+        )
+        return False
+    return True
+
+
 async def resolve_configured_chats(bot: Bot) -> None:
     global resolved_destination_chat_id, resolved_moderation_chat_id
 
@@ -856,8 +894,8 @@ async def configure_commands(bot: Bot) -> None:
         try:
             await bot.set_my_commands(
                 [
+                    BotCommand(command="top", description="Топ модераторов"),
                     BotCommand(command="unblock", description="Разблокировать пользователя"),
-                    BotCommand(command="id", description="Показать ID этого чата"),
                     BotCommand(command="cleanbuttons", description="Убрать старые кнопки с сообщения"),
                 ],
                 scope=BotCommandScopeChat(chat_id=moderation_id),
@@ -945,10 +983,10 @@ async def deliver_group_reply(bot: Bot, message: Message, session: dict[str, obj
 
 
 @router.message(CommandStart(), F.chat.type == "private")
-async def start(message: Message) -> None:
+async def start(message: Message, bot: Bot) -> None:
     if not message.from_user:
         return
-    if db.is_blocked(message.from_user.id):
+    if await is_blocked_from_suggestions(bot, message.from_user.id):
         await safe_answer(
             message,
             f"{ce('ban')} Доступ к отправке предложений заблокирован.",
@@ -964,18 +1002,32 @@ async def start(message: Message) -> None:
     )
 
 
-@router.message(Command("id"), F.chat.type.in_({"group", "supergroup"}))
-async def chat_id_command(message: Message) -> None:
-    moderation_value = moderation_chat_id()
-    destination_value = destination_chat_id()
-    await message.answer(
-        f"ID этого чата: <code>{message.chat.id}</code>\n"
-        f"MODERATION_CHAT_ID в окружении: <code>{html.escape(MODERATION_ENV or '(пусто)')}</code>\n"
-        f"Эффективный ID модерации: <code>{html.escape(str(moderation_value) if moderation_value is not None else 'НЕ ЗАДАН')}</code>\n"
-        f"DESTINATION_CHAT_ID / CHANNEL_ID: <code>{html.escape(DESTINATION_ENV or '(пусто)')}</code>\n"
-        f"Эффективный ID публикации: <code>{html.escape(str(destination_value) if destination_value is not None else 'НЕ ЗАДАН')}</code>\n"
-        f"Источник публикации: <code>{html.escape(destination_config_source())}</code>"
-    )
+@router.message(Command("top"), F.chat.type.in_({"group", "supergroup"}))
+async def top_command(message: Message) -> None:
+    if message.chat.id != moderation_chat_id():
+        return
+    rows = db.moderator_top(10)
+    if not rows:
+        await message.answer("🏆 Пока нет обработанных заявок для рейтинга.")
+        return
+
+    medals = ["🥇", "🥈", "🥉"]
+    lines = []
+    for index, row in enumerate(rows, start=1):
+        medal = medals[index - 1] if index <= len(medals) else f"{index}."
+        name = html.escape(str(row["reviewed_by_name"] or "Модератор"))
+        user_id = int(row["reviewed_by_id"])
+        total = int(row["total"] or 0)
+        accepted = int(row["accepted"] or 0)
+        rejected = int(row["rejected"] or 0)
+        blocked = int(row["blocked"] or 0)
+        lines.append(
+            f"{medal} <b>{name}</b> · ID <code>{user_id}</code>\n"
+            f"   Всего: <b>{total}</b> · Принято: {accepted} · "
+            f"Отклонено: {rejected} · Блокировок: {blocked}"
+        )
+
+    await message.answer("🏆 <b>Топ модераторов</b>\n\n" + "\n\n".join(lines))
 
 
 @router.message(Command("unblock"), F.chat.type.in_({"group", "supergroup"}))
@@ -1031,7 +1083,7 @@ async def inbox(message: Message, bot: Bot) -> None:
         return
     sender_id = message.from_user.id
 
-    if db.is_blocked(sender_id):
+    if await is_blocked_from_suggestions(bot, sender_id):
         await safe_answer(
             message,
             f"{ce('ban')} Доступ к отправке предложений заблокирован.",
@@ -1454,6 +1506,20 @@ async def moderate(callback: CallbackQuery, bot: Bot) -> None:
         notice = f"{ce('cross')} Твоё предложение не принято."
         toast = "Отклонено"
     elif action == "block":
+        membership = await moderation_group_membership(bot, int(sub["user_id"]))
+        if membership is True:
+            await callback.answer(
+                "Нельзя заблокировать участника группы модерации.",
+                show_alert=True,
+            )
+            return
+        if membership is None:
+            await callback.answer(
+                "Не удалось проверить членство пользователя в группе. Бан отменён; "
+                "проверь, что бот может проверять участников группы.",
+                show_alert=True,
+            )
+            return
         if not db.move(
             sub_id,
             "pending",
