@@ -21,6 +21,7 @@ class Storage:
                 album_key TEXT,
                 status TEXT NOT NULL DEFAULT 'collecting',
                 admin_card_id INTEGER,
+                admin_card_mode TEXT NOT NULL DEFAULT 'content',
                 quote_text TEXT NOT NULL DEFAULT '',
                 keyboard_cleaned INTEGER NOT NULL DEFAULT 0,
                 reviewed_by_id INTEGER,
@@ -32,6 +33,7 @@ class Storage:
                 submission_id INTEGER NOT NULL REFERENCES submissions(id),
                 user_id INTEGER NOT NULL,
                 message_id INTEGER NOT NULL,
+                moderation_message_id INTEGER,
                 content_type TEXT NOT NULL DEFAULT '',
                 content_text TEXT NOT NULL DEFAULT '',
                 entities_json TEXT NOT NULL DEFAULT '[]',
@@ -54,6 +56,10 @@ class Storage:
         columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(submissions)")}
         if "admin_card_id" not in columns:
             self.conn.execute("ALTER TABLE submissions ADD COLUMN admin_card_id INTEGER")
+        if "admin_card_mode" not in columns:
+            self.conn.execute(
+                "ALTER TABLE submissions ADD COLUMN admin_card_mode TEXT NOT NULL DEFAULT 'content'"
+            )
         if "quote_text" not in columns:
             self.conn.execute("ALTER TABLE submissions ADD COLUMN quote_text TEXT NOT NULL DEFAULT ''")
         if "keyboard_cleaned" not in columns:
@@ -66,6 +72,8 @@ class Storage:
             self.conn.execute("ALTER TABLE submissions ADD COLUMN reviewed_by_name TEXT")
 
         item_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(items)")}
+        if "moderation_message_id" not in item_columns:
+            self.conn.execute("ALTER TABLE items ADD COLUMN moderation_message_id INTEGER")
         if "content_type" not in item_columns:
             self.conn.execute("ALTER TABLE items ADD COLUMN content_type TEXT NOT NULL DEFAULT ''")
         if "content_text" not in item_columns:
@@ -185,14 +193,48 @@ class Storage:
                 )
             return cur.rowcount == 1
 
-    def set_card_pending(self, submission_id: int, card_id: int) -> None:
+    def set_card_pending(
+        self, submission_id: int, card_id: int, card_mode: str = "content"
+    ) -> None:
         with self.conn:
             self.conn.execute(
-                "UPDATE submissions SET admin_card_id=?, "
+                "UPDATE submissions SET admin_card_id=?, admin_card_mode=?, keyboard_cleaned=0, "
                 "status=CASE WHEN status='notifying' THEN 'pending' ELSE status END "
                 "WHERE id=?",
-                (card_id, submission_id),
+                (card_id, card_mode, submission_id),
             )
+
+    def set_moderation_message_ids(
+        self, submission_id: int, moderation_message_ids: list[int]
+    ) -> None:
+        rows = list(
+            self.conn.execute(
+                "SELECT message_id FROM items WHERE submission_id=? ORDER BY message_id ASC",
+                (submission_id,),
+            )
+        )
+        if len(rows) != len(moderation_message_ids):
+            raise ValueError("Moderation message count does not match submission items")
+        with self.conn:
+            self.conn.executemany(
+                "UPDATE items SET moderation_message_id=? "
+                "WHERE submission_id=? AND message_id=?",
+                [
+                    (moderation_id, submission_id, int(row["message_id"]))
+                    for row, moderation_id in zip(rows, moderation_message_ids)
+                ],
+            )
+
+    def moderation_message_ids(self, submission_id: int) -> list[int]:
+        return [
+            int(row["moderation_message_id"])
+            for row in self.conn.execute(
+                "SELECT moderation_message_id FROM items "
+                "WHERE submission_id=? AND moderation_message_id IS NOT NULL "
+                "ORDER BY message_id ASC",
+                (submission_id,),
+            )
+        ]
 
     def is_blocked(self, user_id: int) -> bool:
         return self.conn.execute(
@@ -230,12 +272,12 @@ class Storage:
             )
 
     def cards_needing_keyboard_cleanup(self) -> list[sqlite3.Row]:
-        """Return non-pending moderation cards whose old inline keyboards have not been checked."""
+        """Return pending cards to refresh and processed cards with keyboards still to clear."""
         return list(
             self.conn.execute(
-                "SELECT id, admin_card_id FROM submissions "
-                "WHERE admin_card_id IS NOT NULL AND status != 'pending' "
-                "AND keyboard_cleaned=0 ORDER BY id ASC"
+                "SELECT id, admin_card_id, admin_card_mode, status FROM submissions "
+                "WHERE admin_card_id IS NOT NULL "
+                "AND (status='pending' OR keyboard_cleaned=0) ORDER BY id ASC"
             )
         )
 
