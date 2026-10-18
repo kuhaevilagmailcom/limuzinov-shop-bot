@@ -251,6 +251,30 @@ class Storage:
                     (moderation_message_id, submission_id, int(row["message_id"])),
                 )
 
+    def moderator_top(self, limit: int = 10) -> list[sqlite3.Row]:
+        """Return moderators ranked by the number of completed decisions."""
+        limit = max(1, min(int(limit), 20))
+        return list(
+            self.conn.execute(
+                """
+                SELECT
+                    reviewed_by_id,
+                    MAX(COALESCE(NULLIF(reviewed_by_name, ''), 'Модератор')) AS reviewed_by_name,
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN status='published' THEN 1 ELSE 0 END) AS accepted,
+                    SUM(CASE WHEN status='rejected' THEN 1 ELSE 0 END) AS rejected,
+                    SUM(CASE WHEN status='blocked' THEN 1 ELSE 0 END) AS blocked
+                FROM submissions
+                WHERE reviewed_by_id IS NOT NULL
+                  AND status IN ('published', 'rejected', 'blocked')
+                GROUP BY reviewed_by_id
+                ORDER BY total DESC, accepted DESC, rejected ASC, reviewed_by_id ASC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+        )
+
     def is_blocked(self, user_id: int) -> bool:
         return self.conn.execute(
             "SELECT 1 FROM blocked_users WHERE user_id=?", (user_id,)
