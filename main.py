@@ -29,6 +29,7 @@ from aiogram.types import (
     Message,
     MessageEntity,
     ReplyParameters,
+    ReplyKeyboardRemove,
 )
 from dotenv import load_dotenv
 
@@ -231,9 +232,11 @@ def custom_emoji_markup_to_entities(value: str) -> tuple[str, list[MessageEntity
     return "".join(parts), entities
 
 
-def plain_keyboard(markup: InlineKeyboardMarkup | None) -> InlineKeyboardMarkup | None:
-    if markup is None:
-        return None
+def plain_keyboard(
+    markup: InlineKeyboardMarkup | ReplyKeyboardRemove | None,
+) -> InlineKeyboardMarkup | ReplyKeyboardRemove | None:
+    if not isinstance(markup, InlineKeyboardMarkup):
+        return markup
     rows = []
     for row in markup.inline_keyboard:
         plain_row = []
@@ -250,9 +253,11 @@ def plain_keyboard(markup: InlineKeyboardMarkup | None) -> InlineKeyboardMarkup 
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def has_custom_button_icons(markup: InlineKeyboardMarkup | None) -> bool:
+def has_custom_button_icons(
+    markup: InlineKeyboardMarkup | ReplyKeyboardRemove | None,
+) -> bool:
     return bool(
-        markup
+        isinstance(markup, InlineKeyboardMarkup)
         and any(button.icon_custom_emoji_id for row in markup.inline_keyboard for button in row)
     )
 
@@ -351,8 +356,8 @@ async def refresh_submission_keyboards(bot: Bot, sub, status: str) -> bool:
         content_ids = [int(card_id)]
 
     success = True
-    if card_mode == "control":
-        # Keep keyboards on every content item; the control card is only a fallback.
+    if card_mode in {"control", "album_control"}:
+        # Keep buttons on all content items; the control card guarantees an accessible action surface.
         targets = [int(card_id)]
         targets.extend(content_ids)
     else:
@@ -435,7 +440,7 @@ def sent_at(utc_value: str) -> str:
 
 
 STATUS_TEXT = {
-    "pending": f"{ce('info')} Статус: на проверке",
+    "pending": "",
     "published": f"{ce('check')} Заявка принята и опубликована",
     "rejected": f"{ce('cross')} Заявка отклонена",
     "blocked": f"{ce('ban')} Пользователь заблокирован",
@@ -575,10 +580,19 @@ def quote_preview(message: Message) -> str:
 
 async def safe_notify(bot: Bot, chat_id: int, text: str) -> None:
     try:
-        await safe_bot_send_message(bot, chat_id, text)
+        await safe_bot_send_message(
+            bot,
+            chat_id,
+            text,
+            reply_markup=ReplyKeyboardRemove(remove_keyboard=True),
+        )
     except TelegramBadRequest:
         try:
-            await bot.send_message(chat_id, html.escape(strip_custom_emoji_markup(text)))
+            await bot.send_message(
+                chat_id,
+                html.escape(strip_custom_emoji_markup(text)),
+                reply_markup=ReplyKeyboardRemove(remove_keyboard=True),
+            )
         except TelegramAPIError as exc:
             logger.info("Cannot notify user %s: %s", chat_id, exc)
     except TelegramAPIError as exc:
@@ -736,9 +750,9 @@ async def copy_submission(
                     sub_id, message_id, exc,
                 )
 
-        if not attached:
-            # Never clear keyboards that were attached successfully. Add a control card
-            # as a fallback for the item whose inline keyboard Telegram rejected.
+        if not attached or len(message_ids) > 1:
+            # Keep any buttons that worked. Albums also get a dedicated control card because
+            # Telegram clients do not render inline keyboards consistently across media groups.
             preview = html.escape(str(sub["quote_text"] or "[Сообщение]")[:700])
             control_text = (
                 f"{moderation_footer(sub, 'pending', html_safe=True)}\n\n"
@@ -791,11 +805,15 @@ async def send_to_moderation_group(bot: Bot, sub_id: int) -> None:
     # Normally each copied item is its own moderation surface. If Telegram rejects
     # a keyboard on any item, a separate text control card is used as a reliable fallback.
     card_id = fallback_card_id or copied_ids[0]
-    card_mode = "control" if fallback_card_id else "content"
+    card_mode = (
+        "album_control" if len(db.items_for_submission(sub_id)) > 1
+        else "control" if fallback_card_id
+        else "content"
+    )
     db.set_card_pending(sub_id, card_id, card_mode)
     current_sub = db.get(sub_id) or sub
     await update_moderation_card(bot, current_sub, "pending")
-    await safe_notify(bot, sub["user_id"], f"{ce('check')} Предложение отправлено на проверку.")
+    await safe_notify(bot, sub["user_id"], f"{ce('check')} Предложение отправлено.")
 
 
 async def finish_album(bot: Bot, sub_id: int, key: tuple[int, str]) -> None:
@@ -931,13 +949,18 @@ async def start(message: Message) -> None:
     if not message.from_user:
         return
     if db.is_blocked(message.from_user.id):
-        await safe_answer(message, f"{ce('ban')} Доступ к отправке предложений заблокирован.")
+        await safe_answer(
+            message,
+            f"{ce('ban')} Доступ к отправке предложений заблокирован.",
+            reply_markup=ReplyKeyboardRemove(remove_keyboard=True),
+        )
         return
     await safe_answer(
         message,
         f"{ce('wave')} <b>Предложка</b>\n\n"
         "Отправь сюда текст, фото, видео, кружок, голосовое, GIF, стикер или файл. "
-        "Предложение появится в группе на проверке."
+        "Предложение появится в группе на проверке.",
+        reply_markup=ReplyKeyboardRemove(remove_keyboard=True),
     )
 
 
@@ -1009,11 +1032,27 @@ async def inbox(message: Message, bot: Bot) -> None:
     sender_id = message.from_user.id
 
     if db.is_blocked(sender_id):
-        await safe_answer(message, f"{ce('ban')} Доступ к отправке предложений заблокирован.")
+        await safe_answer(
+            message,
+            f"{ce('ban')} Доступ к отправке предложений заблокирован.",
+            reply_markup=ReplyKeyboardRemove(remove_keyboard=True),
+        )
+        return
+
+    if message.text and message.text.strip().casefold() == "связаться с владельцем":
+        await safe_answer(
+            message,
+            "Старая кнопка удалена. Отправляй предложение прямо сюда.",
+            reply_markup=ReplyKeyboardRemove(remove_keyboard=True),
+        )
         return
 
     if message.text and message.text.startswith("/"):
-        await message.answer("Нажми /start, чтобы начать, или отправь текст/медиа без команды.")
+        await safe_answer(
+            message,
+            "Нажми /start, чтобы начать, или отправь текст/медиа без команды.",
+            reply_markup=ReplyKeyboardRemove(remove_keyboard=True),
+        )
         return
 
     if message.content_type in {
@@ -1138,7 +1177,7 @@ async def update_moderation_card(bot: Bot, sub, status: str) -> None:
     markup = buttons(submission_id) if status == "pending" else None
     updated = False
 
-    if card_mode == "control":
+    if card_mode in {"control", "album_control"}:
         preview = html.escape(str(sub["quote_text"] or "[Сообщение]")[:700])
         text = (
             f"{moderation_footer(sub, status, html_safe=True)}\n\n"
@@ -1461,7 +1500,11 @@ async def cleanup_processed_inline_keyboards(bot: Bot) -> None:
             continue
         status = str(sub["status"])
         success = await refresh_submission_keyboards(bot, sub, status)
-        if not success and status == "pending" and str(sub["admin_card_mode"] or "content") != "control":
+        if (
+            not success
+            and status == "pending"
+            and str(sub["admin_card_mode"] or "content") not in {"control", "album_control"}
+        ):
             try:
                 preview = html.escape(str(sub["quote_text"] or "[Сообщение]")[:700])
                 control_text = (
