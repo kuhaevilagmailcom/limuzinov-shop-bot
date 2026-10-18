@@ -286,6 +286,22 @@ class Storage:
                 (key, value),
             )
 
+    def prepare_keyboard_cleanup_version(self, version: str) -> None:
+        """Force one cleanup pass when the keyboard-cleanup logic changes."""
+        current = self.get_setting("keyboard_cleanup_version")
+        if current == version:
+            return
+        with self.conn:
+            self.conn.execute(
+                "UPDATE submissions SET keyboard_cleaned=0 "
+                "WHERE admin_card_id IS NOT NULL AND status != 'pending'"
+            )
+            self.conn.execute(
+                "INSERT INTO settings(key,value) VALUES('keyboard_cleanup_version',?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (version,),
+            )
+
     def cards_needing_keyboard_cleanup(self) -> list[sqlite3.Row]:
         """Return pending cards to refresh and processed cards with keyboards still to clear."""
         return list(
