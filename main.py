@@ -1210,7 +1210,14 @@ async def done_command(message: Message, bot: Bot) -> None:
 
     total = db.user_count()
     if total == 0:
-        await message.answer("Пока нет пользователей, которым можно отправить рассылку.")
+        known_submissions = db.known_submission_user_count()
+        await message.answer(
+            "Пока нет пользователей в текущей базе для рассылки.\n"
+            f"Пользователей из старых заявок найдено: {known_submissions}.\n\n"
+            "Если ботом пользуются тысячи людей, проверь DB_PATH в BotHost: "
+            "возможно, приложение запущено с новой пустой SQLite-базой. "
+            "Telegram не позволяет автоматически получить полный список старых пользователей по /start."
+        )
         return
     confirmation = await safe_answer(
         message,
