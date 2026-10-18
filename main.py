@@ -985,7 +985,17 @@ def render_users_page(offset: int) -> str:
             f"{index}. {ce('profile')} <b>{full_name}</b>\n"
             f"   {username} · ID <code>{int(user['user_id'])}</code>"
         )
-    body = "\n\n".join(lines) if lines else "Пользователей пока нет."
+    if lines:
+        body = "\n\n".join(lines)
+    else:
+        known_submissions = db.known_submission_user_count()
+        body = (
+            "В текущей базе нет сохранённых пользователей. "
+            f"Пользователей из старых заявок найдено: <b>{known_submissions}</b>.\n\n"
+            "Telegram не позволяет боту автоматически выгрузить всех, кто когда-либо нажимал /start. "
+            "Если людей в боте тысячи, проверь DB_PATH в BotHost: возможно, бот открыл новую пустую SQLite-базу "
+            "вместо прежней."
+        )
     return (
         f"{ce('info')} <b>Пользователи бота</b>\n"
         f"Всего: <b>{total}</b> · Страница <b>{page}/{pages}</b>\n\n{body}"
@@ -2015,6 +2025,12 @@ async def main() -> None:
             MODERATION_ENV or f"fallback:{REQUESTED_DEFAULT_CHAT_ID}",
             destination_chat_id(),
             destination_config_source(),
+        )
+        logger.info(
+            "Database diagnostics: DB_PATH=%s, registered_users=%s, users_with_submissions=%s",
+            DB_PATH,
+            db.user_count(),
+            db.known_submission_user_count(),
         )
         await cleanup_processed_inline_keyboards(bot)
         recovery_job = asyncio.create_task(recover(bot))
