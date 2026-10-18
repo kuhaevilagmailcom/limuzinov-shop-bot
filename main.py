@@ -312,7 +312,7 @@ async def safe_edit_text(message: Message, text: str, **kwargs):
 
 
 async def safe_edit_reply_markup(
-    bot: Bot, chat_id: int, message_id: int, markup: InlineKeyboardMarkup | None
+    bot: Bot, chat_id: int | str, message_id: int, markup: InlineKeyboardMarkup | None
 ):
     try:
         return await bot.edit_message_reply_markup(
@@ -350,6 +350,7 @@ async def refresh_submission_keyboards(bot: Bot, sub, status: str) -> bool:
     if not content_ids:
         content_ids = [int(card_id)]
 
+    success = True
     if card_mode == "control":
         # The fallback control card owns the buttons; copied content messages stay clean.
         targets = [int(card_id)]
@@ -358,6 +359,7 @@ async def refresh_submission_keyboards(bot: Bot, sub, status: str) -> bool:
                 try:
                     await safe_edit_reply_markup(bot, target, message_id, None)
                 except TelegramAPIError as exc:
+                    success = False
                     logger.warning(
                         "Could not clear content keyboard for submission %s / message %s: %s",
                         submission_id, message_id, exc,
@@ -370,7 +372,6 @@ async def refresh_submission_keyboards(bot: Bot, sub, status: str) -> bool:
             targets.insert(0, int(card_id))
 
     markup = buttons(submission_id) if status == "pending" else None
-    success = True
     for message_id in dict.fromkeys(targets):
         try:
             await safe_edit_reply_markup(bot, target, int(message_id), markup)
@@ -487,9 +488,12 @@ def status_buttons(
     return InlineKeyboardMarkup(inline_keyboard=[[button]])
 
 
-def moderation_footer(sub, status: str) -> str:
+def moderation_footer(sub, status: str, *, html_safe: bool = False) -> str:
     username = f"@{sub['username']}" if sub["username"] else "без username"
     name = sub["full_name"] or "Не указано"
+    if html_safe:
+        username = html.escape(username)
+        name = html.escape(name)
     status_text = STATUS_TEXT.get(status, f"{ce('info')} Заявка обработана")
     decision_labels = {
         "published": "Принял",
@@ -501,6 +505,8 @@ def moderation_footer(sub, status: str) -> str:
     reviewer_id = sub["reviewed_by_id"]
     reviewer_name = sub["reviewed_by_name"]
     if decision_label and reviewer_id and reviewer_name:
+        if html_safe:
+            reviewer_name = html.escape(reviewer_name)
         decision_line = (
             f"\n{ce('profile')} {decision_label}: {reviewer_name} · ID {reviewer_id}"
         )
@@ -753,7 +759,7 @@ async def copy_submission(
                     )
             preview = html.escape(str(sub["quote_text"] or "[Сообщение]")[:700])
             control_text = (
-                f"{moderation_footer(sub, 'pending')}\n\n"
+                f"{moderation_footer(sub, 'pending', html_safe=True)}\n\n"
                 f"{ce('info')} Контент заявки: {preview}"
             )
             control_card = await safe_bot_send_message(
@@ -1058,6 +1064,8 @@ async def group_reply_handler(message: Message, bot: Bot) -> None:
     allowed_reply_ids = {prompt_id}
     if active_sub and active_sub["admin_card_id"]:
         allowed_reply_ids.add(int(active_sub["admin_card_id"]))
+    if active_sub:
+        allowed_reply_ids.update(db.moderation_message_ids(int(active_sub["id"])))
     if not replied_to or replied_to.message_id not in allowed_reply_ids:
         return
 
@@ -1118,7 +1126,7 @@ async def update_moderation_card(bot: Bot, sub, status: str) -> None:
     if card_mode == "control":
         preview = html.escape(str(sub["quote_text"] or "[Сообщение]")[:700])
         text = (
-            f"{moderation_footer(sub, status)}\n\n"
+            f"{moderation_footer(sub, status, html_safe=True)}\n\n"
             f"{ce('info')} Контент заявки: {preview}"
         )
         try:
@@ -1432,6 +1440,32 @@ async def cleanup_processed_inline_keyboards(bot: Bot) -> None:
             continue
         status = str(sub["status"])
         success = await refresh_submission_keyboards(bot, sub, status)
+        if not success and status == "pending" and str(sub["admin_card_mode"] or "content") != "control":
+            try:
+                preview = html.escape(str(sub["quote_text"] or "[Сообщение]")[:700])
+                control_text = (
+                    f"{moderation_footer(sub, 'pending', html_safe=True)}\n\n"
+                    f"{ce('info')} Контент заявки: {preview}"
+                )
+                control_card = await safe_bot_send_message(
+                    bot,
+                    chat_id=target,
+                    text=control_text,
+                    reply_markup=buttons(submission_id),
+                    reply_parameters=ReplyParameters(
+                        message_id=int(sub["admin_card_id"]),
+                        allow_sending_without_reply=True,
+                    ),
+                )
+                db.set_card_pending(submission_id, control_card.message_id, "control")
+                refreshed_sub = db.get(submission_id)
+                if refreshed_sub:
+                    success = await refresh_submission_keyboards(bot, refreshed_sub, "pending")
+            except TelegramAPIError as exc:
+                logger.warning(
+                    "Could not create fallback control card for old submission %s: %s",
+                    submission_id, exc,
+                )
         if success and status != "pending":
             db.mark_keyboard_cleaned(submission_id)
         if success:
