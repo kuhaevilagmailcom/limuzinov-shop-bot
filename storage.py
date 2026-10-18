@@ -290,7 +290,7 @@ class Storage:
                 INSERT INTO bot_users(user_id, username, full_name, first_seen_at, last_seen_at)
                 VALUES (?, ?, ?, datetime('now'), datetime('now'))
                 ON CONFLICT(user_id) DO UPDATE SET
-                    username=COALESCE(excluded.username, bot_users.username),
+                    username=excluded.username,
                     full_name=excluded.full_name,
                     last_seen_at=datetime('now')
                 """,
