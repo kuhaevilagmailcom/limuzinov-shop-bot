@@ -728,7 +728,7 @@ async def copy_submission(
             try:
                 await safe_edit_reply_markup(
                     bot,
-                    chat_id=int(destination),
+                    chat_id=destination,
                     message_id=message_id,
                     markup=buttons(sub_id),
                 )
@@ -744,7 +744,7 @@ async def copy_submission(
             for message_id in copied_ids:
                 try:
                     await safe_edit_reply_markup(
-                        bot, chat_id=int(destination), message_id=message_id, markup=None
+                        bot, chat_id=destination, message_id=message_id, markup=None
                     )
                 except TelegramAPIError as exc:
                     logger.warning(
@@ -1124,7 +1124,7 @@ async def update_moderation_card(bot: Bot, sub, status: str) -> None:
         try:
             await safe_bot_edit_message_text(
                 bot,
-                chat_id=int(target),
+                chat_id=target,
                 message_id=int(card_id),
                 text=text,
                 reply_markup=markup,
@@ -1144,7 +1144,7 @@ async def update_moderation_card(bot: Bot, sub, status: str) -> None:
             try:
                 if kind == "text":
                     await bot.edit_message_text(
-                        chat_id=int(target),
+                        chat_id=target,
                         message_id=int(card_id),
                         text=combined,
                         entities=entities or None,
@@ -1153,7 +1153,7 @@ async def update_moderation_card(bot: Bot, sub, status: str) -> None:
                     )
                 else:
                     await bot.edit_message_caption(
-                        chat_id=int(target),
+                        chat_id=target,
                         message_id=int(card_id),
                         caption=combined,
                         caption_entities=entities or None,
@@ -1172,7 +1172,7 @@ async def update_moderation_card(bot: Bot, sub, status: str) -> None:
                 try:
                     if kind == "text":
                         await bot.edit_message_text(
-                            chat_id=int(target),
+                            chat_id=target,
                             message_id=int(card_id),
                             text=strip_custom_emoji_markup(combined),
                             entities=fallback_entities or None,
@@ -1181,7 +1181,7 @@ async def update_moderation_card(bot: Bot, sub, status: str) -> None:
                         )
                     else:
                         await bot.edit_message_caption(
-                            chat_id=int(target),
+                            chat_id=target,
                             message_id=int(card_id),
                             caption=strip_custom_emoji_markup(combined),
                             caption_entities=fallback_entities or None,
@@ -1219,7 +1219,7 @@ async def update_moderation_card(bot: Bot, sub, status: str) -> None:
         try:
             await safe_bot_send_message(
                 bot,
-                chat_id=int(target),
+                chat_id=target,
                 text=f"{status_text}{decision_line}",
                 reply_parameters=ReplyParameters(
                     message_id=int(card_id),
