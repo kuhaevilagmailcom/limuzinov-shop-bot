@@ -356,7 +356,7 @@ async def refresh_submission_keyboards(bot: Bot, sub, status: str) -> bool:
         if status == "pending":
             for message_id in content_ids:
                 try:
-                    await safe_edit_reply_markup(bot, int(target), message_id, None)
+                    await safe_edit_reply_markup(bot, target, message_id, None)
                 except TelegramAPIError as exc:
                     logger.warning(
                         "Could not clear content keyboard for submission %s / message %s: %s",
@@ -373,7 +373,7 @@ async def refresh_submission_keyboards(bot: Bot, sub, status: str) -> bool:
     success = True
     for message_id in dict.fromkeys(targets):
         try:
-            await safe_edit_reply_markup(bot, int(target), int(message_id), markup)
+            await safe_edit_reply_markup(bot, target, int(message_id), markup)
         except TelegramAPIError as exc:
             success = False
             logger.warning(
