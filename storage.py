@@ -26,6 +26,7 @@ class Storage:
                 keyboard_cleaned INTEGER NOT NULL DEFAULT 0,
                 reviewed_by_id INTEGER,
                 reviewed_by_name TEXT,
+                published_at TEXT,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 UNIQUE(user_id, album_key)
             );
@@ -50,6 +51,15 @@ class Storage:
                 blocked_by INTEGER NOT NULL,
                 blocked_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
+            CREATE TABLE IF NOT EXISTS bot_users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                full_name TEXT NOT NULL,
+                first_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+                last_seen_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS bot_users_seen_idx
+                ON bot_users(first_seen_at DESC, user_id DESC);
         """)
 
         # Add fields when opening databases made by the earlier direct-publication version.
@@ -70,6 +80,8 @@ class Storage:
             self.conn.execute("ALTER TABLE submissions ADD COLUMN reviewed_by_id INTEGER")
         if "reviewed_by_name" not in columns:
             self.conn.execute("ALTER TABLE submissions ADD COLUMN reviewed_by_name TEXT")
+        if "published_at" not in columns:
+            self.conn.execute("ALTER TABLE submissions ADD COLUMN published_at TEXT")
 
         item_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(items)")}
         if "moderation_message_id" not in item_columns:
@@ -80,6 +92,21 @@ class Storage:
             self.conn.execute("ALTER TABLE items ADD COLUMN content_text TEXT NOT NULL DEFAULT ''")
         if "entities_json" not in item_columns:
             self.conn.execute("ALTER TABLE items ADD COLUMN entities_json TEXT NOT NULL DEFAULT '[]'")
+
+        # Preserve users already known from submissions and blocks when upgrading an existing database.
+        self.conn.execute("""
+            INSERT OR IGNORE INTO bot_users(
+                user_id, username, full_name, first_seen_at, last_seen_at
+            )
+            SELECT user_id, MAX(username), COALESCE(MAX(full_name), 'Пользователь'),
+                   MIN(created_at), MAX(created_at)
+            FROM submissions
+            GROUP BY user_id
+        """)
+        self.conn.execute("""
+            INSERT OR IGNORE INTO bot_users(user_id, full_name)
+            SELECT user_id, 'Пользователь' FROM blocked_users
+        """)
 
     def add(
         self,
@@ -180,17 +207,18 @@ class Storage:
         reviewed_by_name: str | None = None,
     ) -> bool:
         with self.conn:
-            if reviewed_by_id is None and reviewed_by_name is None:
-                cur = self.conn.execute(
-                    "UPDATE submissions SET status=? WHERE id=? AND status=?",
-                    (to_status, submission_id, from_status),
-                )
-            else:
-                cur = self.conn.execute(
-                    "UPDATE submissions SET status=?, reviewed_by_id=?, reviewed_by_name=? "
-                    "WHERE id=? AND status=?",
-                    (to_status, reviewed_by_id, reviewed_by_name, submission_id, from_status),
-                )
+            assignments = ["status=?"]
+            params: list[object] = [to_status]
+            if to_status == "published":
+                assignments.append("published_at=datetime('now')")
+            if reviewed_by_id is not None or reviewed_by_name is not None:
+                assignments.extend(["reviewed_by_id=?", "reviewed_by_name=?"])
+                params.extend([reviewed_by_id, reviewed_by_name])
+            params.extend([submission_id, from_status])
+            cur = self.conn.execute(
+                f"UPDATE submissions SET {', '.join(assignments)} WHERE id=? AND status=?",
+                params,
+            )
             return cur.rowcount == 1
 
     def set_card_pending(
@@ -250,6 +278,81 @@ class Storage:
                     "WHERE submission_id=? AND message_id=?",
                     (moderation_message_id, submission_id, int(row["message_id"])),
                 )
+
+    def register_user(
+        self, user_id: int, username: str | None, full_name: str
+    ) -> None:
+        """Remember every person who opens or messages the bot in private."""
+        name = full_name.strip() or "Пользователь"
+        with self.conn:
+            self.conn.execute(
+                """
+                INSERT INTO bot_users(user_id, username, full_name, first_seen_at, last_seen_at)
+                VALUES (?, ?, ?, datetime('now'), datetime('now'))
+                ON CONFLICT(user_id) DO UPDATE SET
+                    username=COALESCE(excluded.username, bot_users.username),
+                    full_name=excluded.full_name,
+                    last_seen_at=datetime('now')
+                """,
+                (int(user_id), username, name),
+            )
+
+    def user_count(self) -> int:
+        row = self.conn.execute("SELECT COUNT(*) AS total FROM bot_users").fetchone()
+        return int(row["total"] or 0)
+
+    def list_users(self, offset: int = 0, limit: int = 10) -> list[sqlite3.Row]:
+        offset = max(0, int(offset))
+        limit = max(1, min(int(limit), 20))
+        return list(
+            self.conn.execute(
+                """
+                SELECT user_id, username, full_name, first_seen_at, last_seen_at
+                FROM bot_users
+                ORDER BY first_seen_at DESC, user_id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (limit, offset),
+            )
+        )
+
+    def all_user_ids(self) -> list[int]:
+        return [
+            int(row["user_id"])
+            for row in self.conn.execute("SELECT user_id FROM bot_users ORDER BY user_id")
+        ]
+
+    def published_counts(
+        self,
+        *,
+        today_start: str,
+        week_start: str,
+        month_start: str,
+        now: str,
+    ) -> dict[str, int]:
+        """Count published submissions in local-time windows expressed as UTC strings."""
+        row = self.conn.execute(
+            """
+            SELECT
+                COALESCE(SUM(CASE
+                    WHEN COALESCE(published_at, created_at) >= ?
+                     AND COALESCE(published_at, created_at) < ? THEN 1 ELSE 0 END), 0) AS today,
+                COALESCE(SUM(CASE
+                    WHEN COALESCE(published_at, created_at) >= ?
+                     AND COALESCE(published_at, created_at) < ? THEN 1 ELSE 0 END), 0) AS week,
+                COALESCE(SUM(CASE
+                    WHEN COALESCE(published_at, created_at) >= ?
+                     AND COALESCE(published_at, created_at) < ? THEN 1 ELSE 0 END), 0) AS month
+            FROM submissions
+            WHERE status='published'
+            """,
+            (today_start, now, week_start, now, month_start, now),
+        ).fetchone()
+        return {
+            "today": int(row["today"] or 0),
+            "week": int(row["week"] or 0),
+            "month": int(row["month"] or 0),
+        }
 
     def moderator_top(self, limit: int = 10) -> list[sqlite3.Row]:
         """Return moderators ranked by the number of completed decisions."""
