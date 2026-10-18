@@ -858,6 +858,7 @@ async def configure_commands(bot: Bot) -> None:
                 [
                     BotCommand(command="unblock", description="Разблокировать пользователя"),
                     BotCommand(command="id", description="Показать ID этого чата"),
+                    BotCommand(command="cleanbuttons", description="Убрать старые кнопки с поста канала"),
                 ],
                 scope=BotCommandScopeChat(chat_id=moderation_id),
             )
@@ -985,6 +986,34 @@ async def unblock_command(message: Message) -> None:
         await safe_answer(message, f"{ce('check')} Пользователь <code>{target_user_id}</code> разблокирован.")
     else:
         await message.answer(f"Пользователь <code>{target_user_id}</code> не был заблокирован.")
+
+
+@router.message(Command("cleanbuttons"), F.chat.type.in_({"group", "supergroup"}))
+async def cleanbuttons_command(message: Message, bot: Bot) -> None:
+    if message.chat.id != moderation_chat_id():
+        return
+    target = destination_chat_id()
+    if target is None:
+        await message.answer("Не настроен канал публикации. Проверь DESTINATION_CHAT_ID.")
+        return
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) != 2 or not parts[1].strip().isdigit():
+        await message.answer(
+            "Используй: <code>/cleanbuttons POST_ID</code>\n"
+            "POST_ID — число в конце ссылки на старый пост в канале."
+        )
+        return
+    post_id = int(parts[1].strip())
+    try:
+        await safe_edit_reply_markup(bot, target, post_id, None)
+    except TelegramAPIError as exc:
+        logger.warning("Could not remove old channel keyboard from post %s: %s", post_id, exc)
+        await message.answer(
+            f"Не получилось убрать кнопки у поста <code>{post_id}</code>. "
+            "Проверь ID и права бота администратора в канале."
+        )
+        return
+    await message.answer(f"{ce('check')} Кнопки у поста <code>{post_id}</code> убраны.")
 
 
 @router.message(F.chat.type == "private")
