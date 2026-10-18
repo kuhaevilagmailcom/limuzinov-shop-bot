@@ -7,7 +7,7 @@ import json
 import logging
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -68,6 +68,8 @@ db = Storage(DB_PATH)
 album_jobs: dict[tuple[int, str], asyncio.Task] = {}
 reply_sessions: dict[int, dict[str, object]] = {}
 reply_jobs: dict[int, asyncio.Task] = {}
+broadcast_sessions: dict[int, dict[str, object]] = {}
+USERS_PAGE_SIZE = 10
 resolved_destination_chat_id: int | None = None
 resolved_moderation_chat_id: int | None = None
 
@@ -175,6 +177,43 @@ async def is_blocked_from_suggestions(bot: Bot, user_id: int) -> bool:
         )
         return False
     return True
+
+
+async def is_moderation_admin(bot: Bot, user_id: int) -> bool:
+    """Only Telegram administrators of the configured moderation group can use admin tools."""
+    group_id = moderation_chat_id()
+    if group_id is None:
+        return False
+    try:
+        member = await bot.get_chat_member(chat_id=group_id, user_id=user_id)
+    except TelegramAPIError as exc:
+        logger.warning("Could not verify moderator permissions for user %s: %s", user_id, exc)
+        return False
+    status = getattr(member.status, "value", member.status)
+    return status in {"creator", "administrator"}
+
+
+def publication_window_starts() -> dict[str, str]:
+    """Return local-day, rolling-seven-day and local-month starts as UTC SQLite timestamps."""
+    try:
+        tz = ZoneInfo(TIMEZONE)
+    except ZoneInfoNotFoundError:
+        logger.warning("Unknown TIMEZONE %r; publication statistics will use UTC", TIMEZONE)
+        tz = timezone.utc
+    now_local = datetime.now(tz)
+    today_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_start = now_local - timedelta(days=7)
+    month_start = now_local.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    def utc_sql(dt: datetime) -> str:
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+    return {
+        "today_start": utc_sql(today_start),
+        "week_start": utc_sql(week_start),
+        "month_start": utc_sql(month_start),
+        "now": utc_sql(now_local),
+    }
 
 
 async def resolve_configured_chats(bot: Bot) -> None:
@@ -886,7 +925,10 @@ async def configure_commands(bot: Bot) -> None:
             except TelegramAPIError as exc:
                 logger.debug("Could not clear old bot commands (%s): %s", type(scope).__name__, exc)
 
-    start_command = [BotCommand(command="start", description="Отправить предложение")]
+    start_command = [
+        BotCommand(command="start", description="Отправить предложение"),
+        BotCommand(command="help", description="Помощь"),
+    ]
     await bot.set_my_commands(start_command, scope=BotCommandScopeDefault())
     await bot.set_my_commands(start_command, scope=BotCommandScopeAllPrivateChats())
 
@@ -894,7 +936,10 @@ async def configure_commands(bot: Bot) -> None:
         try:
             await bot.set_my_commands(
                 [
+                    BotCommand(command="help", description="Список команд"),
                     BotCommand(command="top", description="Топ модераторов"),
+                    BotCommand(command="done", description="Рассылка пользователям"),
+                    BotCommand(command="users", description="Список пользователей"),
                     BotCommand(command="unblock", description="Разблокировать пользователя"),
                     BotCommand(command="cleanbuttons", description="Убрать старые кнопки с сообщения"),
                 ],
@@ -907,6 +952,63 @@ async def configure_commands(bot: Bot) -> None:
         await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
     except TelegramAPIError as exc:
         logger.warning("Could not reset bot menu button: %s", exc)
+
+
+def users_page_keyboard(offset: int, total: int) -> InlineKeyboardMarkup | None:
+    buttons_row = []
+    if offset > 0:
+        buttons_row.append(
+            InlineKeyboardButton(text="⬅️ Назад", callback_data=f"users:page:{max(0, offset - USERS_PAGE_SIZE)}")
+        )
+    if offset + USERS_PAGE_SIZE < total:
+        buttons_row.append(
+            InlineKeyboardButton(text="Далее ➡️", callback_data=f"users:page:{offset + USERS_PAGE_SIZE}")
+        )
+    return InlineKeyboardMarkup(inline_keyboard=[buttons_row]) if buttons_row else None
+
+
+def render_users_page(offset: int) -> str:
+    total = db.user_count()
+    offset = max(0, min(offset, max(0, total - 1)))
+    users = db.list_users(offset, USERS_PAGE_SIZE)
+    pages = max(1, (total + USERS_PAGE_SIZE - 1) // USERS_PAGE_SIZE)
+    page = offset // USERS_PAGE_SIZE + 1
+    lines = []
+    for index, user in enumerate(users, start=offset + 1):
+        full_name = html.escape(str(user["full_name"] or "Пользователь"))
+        username = (
+            f"@{html.escape(str(user['username']))}"
+            if user["username"]
+            else "<i>без username</i>"
+        )
+        lines.append(
+            f"{index}. {ce('profile')} <b>{full_name}</b>\n"
+            f"   {username} · ID <code>{int(user['user_id'])}</code>"
+        )
+    body = "\n\n".join(lines) if lines else "Пользователей пока нет."
+    return (
+        f"{ce('info')} <b>Пользователи бота</b>\n"
+        f"Всего: <b>{total}</b> · Страница <b>{page}/{pages}</b>\n\n{body}"
+    )
+
+
+def broadcast_confirmation_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Отправить всем",
+                    callback_data="broadcast:confirm",
+                    icon_custom_emoji_id=CUSTOM_EMOJIS["check"][0],
+                ),
+                InlineKeyboardButton(
+                    text="Отмена",
+                    callback_data="broadcast:cancel",
+                    icon_custom_emoji_id=CUSTOM_EMOJIS["cross"][0],
+                ),
+            ]
+        ]
+    )
 
 
 def clear_reply_session(user_id: int) -> dict[str, object] | None:
@@ -986,6 +1088,12 @@ async def deliver_group_reply(bot: Bot, message: Message, session: dict[str, obj
 async def start(message: Message, bot: Bot) -> None:
     if not message.from_user:
         return
+    if not message.from_user.is_bot:
+        db.register_user(
+            message.from_user.id,
+            message.from_user.username,
+            message.from_user.full_name,
+        )
     if await is_blocked_from_suggestions(bot, message.from_user.id):
         await safe_answer(
             message,
@@ -1002,15 +1110,117 @@ async def start(message: Message, bot: Bot) -> None:
     )
 
 
+@router.message(Command("help"))
+async def help_command(message: Message, bot: Bot) -> None:
+    if message.chat.type == "private":
+        if message.from_user and not message.from_user.is_bot:
+            db.register_user(
+                message.from_user.id,
+                message.from_user.username,
+                message.from_user.full_name,
+            )
+        await safe_answer(
+            message,
+            "ℹ️ <b>Доступные команды</b>\n"
+            "/start — начать отправку предложений\n"
+            "/help — показать эту справку",
+        )
+        return
+    if message.chat.type not in {"group", "supergroup"} or message.chat.id != moderation_chat_id():
+        return
+    await safe_answer(
+        message,
+        "ℹ️ <b>Команды группы модерации</b>\n\n"
+        "/top — рейтинг модераторов и статистика публикаций\n"
+        "/users — список пользователей с ником и ID <i>(только администраторы)</i>\n"
+        "/done ТЕКСТ — рассылка всем пользователям; также можно ответить командой /done на сообщение "
+        "и разослать его <i>(только администраторы)</i>\n"
+        "/unblock USER_ID — снять блокировку\n"
+        "/cleanbuttons — убрать кнопки с сообщения, на которое ответили; "
+        "/cleanbuttons POST_ID — убрать кнопки в канале\n"
+        "/help — список команд",
+    )
+
+
+@router.message(Command("users"), F.chat.type.in_({"group", "supergroup"}))
+async def users_command(message: Message, bot: Bot) -> None:
+    if message.chat.id != moderation_chat_id():
+        return
+    if not message.from_user or not await is_moderation_admin(bot, message.from_user.id):
+        await message.answer("Эта команда доступна только администраторам группы модерации.")
+        return
+    total = db.user_count()
+    await safe_answer(
+        message,
+        render_users_page(0),
+        reply_markup=users_page_keyboard(0, total),
+    )
+
+
+@router.message(Command("done"), F.chat.type.in_({"group", "supergroup"}))
+async def done_command(message: Message, bot: Bot) -> None:
+    if message.chat.id != moderation_chat_id():
+        return
+    if not message.from_user or not await is_moderation_admin(bot, message.from_user.id):
+        await message.answer("Эта команда доступна только администраторам группы модерации.")
+        return
+
+    parts = (message.text or "").split(maxsplit=1)
+    body = parts[1].strip() if len(parts) > 1 else ""
+    if body:
+        session: dict[str, object] = {
+            "mode": "text",
+            "text": body,
+            "admin_id": message.from_user.id,
+        }
+        preview = html.escape(body[:700])
+        if len(body) > 700:
+            preview += "…"
+        preview_text = f"<b>Текст рассылки:</b>\n<blockquote>{preview}</blockquote>"
+    elif message.reply_to_message:
+        session = {
+            "mode": "copy",
+            "source_chat_id": message.chat.id,
+            "source_message_id": message.reply_to_message.message_id,
+            "admin_id": message.from_user.id,
+        }
+        source = message.reply_to_message
+        source_preview = html.escape(
+            (source.text or source.caption or f"[{source.content_type}]")[:500]
+        )
+        preview_text = (
+            "<b>Будет разослано сообщение, на которое ты ответил командой /done.</b>\n"
+            f"<blockquote>{source_preview}</blockquote>"
+        )
+    else:
+        await message.answer(
+            "Использование:\n"
+            "/done Текст рассылки\n"
+            "или ответь командой /done на сообщение, которое нужно разослать."
+        )
+        return
+
+    total = db.user_count()
+    if total == 0:
+        await message.answer("Пока нет пользователей, которым можно отправить рассылку.")
+        return
+    confirmation = await safe_answer(
+        message,
+        f"📣 <b>Подтверди рассылку</b>\n"
+        f"Получателей в базе: <b>{total}</b>\n\n"
+        f"{preview_text}\n\n"
+        "Нажми «Отправить всем», чтобы начать.",
+        reply_markup=broadcast_confirmation_keyboard(),
+    )
+    session["confirm_message_id"] = confirmation.message_id
+    broadcast_sessions[message.from_user.id] = session
+
+
 @router.message(Command("top"), F.chat.type.in_({"group", "supergroup"}))
 async def top_command(message: Message) -> None:
     if message.chat.id != moderation_chat_id():
         return
     rows = db.moderator_top(10)
-    if not rows:
-        await message.answer("🏆 Пока нет обработанных заявок для рейтинга.")
-        return
-
     medals = ["🥇", "🥈", "🥉"]
     lines = []
     for index, row in enumerate(rows, start=1):
@@ -1026,7 +1236,17 @@ async def top_command(message: Message) -> None:
             f"   Всего: <b>{total}</b> · Принято: {accepted} · "
             f"Отклонено: {rejected} · Блокировок: {blocked}"
         )
+    if not lines:
+        lines.append("Пока нет обработанных заявок для рейтинга.")
 
+    periods = publication_window_starts()
+    published = db.published_counts(**periods)
+    lines.append(
+        "📊 <b>Опубликовано постов</b>\n"
+        f"Сегодня: <b>{published['today']}</b>\n"
+        f"За последние 7 дней: <b>{published['week']}</b>\n"
+        f"За месяц: <b>{published['month']}</b>"
+    )
     await message.answer("🏆 <b>Топ модераторов</b>\n\n" + "\n\n".join(lines))
 
 
@@ -1082,6 +1302,12 @@ async def inbox(message: Message, bot: Bot) -> None:
     if not message.from_user:
         return
     sender_id = message.from_user.id
+    if not message.from_user.is_bot:
+        db.register_user(
+            sender_id,
+            message.from_user.username,
+            message.from_user.full_name,
+        )
 
     if await is_blocked_from_suggestions(bot, sender_id):
         await safe_answer(
@@ -1348,6 +1574,109 @@ async def update_moderation_card(bot: Bot, sub, status: str) -> None:
 
     if status != "pending" and keyboards_ok:
         db.mark_keyboard_cleaned(submission_id)
+
+
+@router.callback_query(F.data.startswith("users:"))
+async def users_pagination_callback(callback: CallbackQuery, bot: Bot) -> None:
+    message = callback.message
+    if not message or message.chat.id != moderation_chat_id():
+        await callback.answer("Список доступен только в группе модерации.", show_alert=True)
+        return
+    if not await is_moderation_admin(bot, callback.from_user.id):
+        await callback.answer("Только администраторы группы могут просматривать список.", show_alert=True)
+        return
+    try:
+        _, action, raw_offset = (callback.data or "").split(":")
+        if action != "page":
+            await callback.answer()
+            return
+        offset = max(0, int(raw_offset))
+    except (ValueError, TypeError):
+        await callback.answer("Некорректная страница.", show_alert=True)
+        return
+    total = db.user_count()
+    offset = min(offset, max(0, ((total - 1) // USERS_PAGE_SIZE) * USERS_PAGE_SIZE))
+    try:
+        await safe_edit_text(
+            message,
+            render_users_page(offset),
+            reply_markup=users_page_keyboard(offset, total),
+        )
+    except TelegramAPIError as exc:
+        logger.warning("Could not update users page: %s", exc)
+        await callback.answer("Не удалось обновить страницу.", show_alert=True)
+        return
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("broadcast:"))
+async def broadcast_callback(callback: CallbackQuery, bot: Bot) -> None:
+    message = callback.message
+    if not message or message.chat.id != moderation_chat_id():
+        await callback.answer("Рассылка доступна только в группе модерации.", show_alert=True)
+        return
+    if not await is_moderation_admin(bot, callback.from_user.id):
+        await callback.answer("Только администратор группы может управлять рассылкой.", show_alert=True)
+        return
+    session = broadcast_sessions.get(callback.from_user.id)
+    if not session or int(session.get("confirm_message_id", 0)) != message.message_id:
+        await callback.answer("Эта рассылка уже завершена или устарела.", show_alert=True)
+        return
+
+    action = (callback.data or "").split(":", maxsplit=1)[-1]
+    if action == "cancel":
+        broadcast_sessions.pop(callback.from_user.id, None)
+        await callback.answer("Рассылка отменена.")
+        await safe_edit_text(
+            message,
+            "❌ <b>Рассылка отменена.</b>",
+            reply_markup=None,
+        )
+        return
+    if action != "confirm":
+        await callback.answer("Неизвестное действие.", show_alert=True)
+        return
+
+    broadcast_sessions.pop(callback.from_user.id, None)
+    await callback.answer("Рассылка запущена.")
+    recipients = db.all_user_ids()
+    sent = 0
+    failed = 0
+    mode = str(session.get("mode", ""))
+    for user_id in recipients:
+        try:
+            if mode == "copy":
+                await bot.copy_message(
+                    chat_id=user_id,
+                    from_chat_id=int(session["source_chat_id"]),
+                    message_id=int(session["source_message_id"]),
+                )
+            else:
+                await safe_bot_send_message(
+                    bot,
+                    user_id,
+                    html.escape(str(session.get("text", ""))),
+                )
+            sent += 1
+        except TelegramAPIError as exc:
+            failed += 1
+            logger.debug("Broadcast delivery failed for user %s: %s", user_id, exc)
+        await asyncio.sleep(0.04)
+
+    logger.info(
+        "Broadcast finished: admin=%s sent=%s failed=%s total=%s",
+        callback.from_user.id, sent, failed, len(recipients),
+    )
+    result = (
+        "📣 <b>Рассылка завершена</b>\n"
+        f"Получателей в базе: <b>{len(recipients)}</b>\n"
+        f"Доставлено: <b>{sent}</b>\n"
+        f"Не удалось отправить: <b>{failed}</b>"
+    )
+    try:
+        await safe_edit_text(message, result, reply_markup=None)
+    except TelegramAPIError:
+        await safe_answer(message, result)
 
 
 @router.callback_query(F.data.startswith("mod:"))
