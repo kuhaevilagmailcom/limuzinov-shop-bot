@@ -442,7 +442,8 @@ async def refresh_submission_keyboards(bot: Bot, sub, status: str) -> bool:
         if int(card_id) not in targets:
             targets.insert(0, int(card_id))
 
-    markup = buttons(submission_id) if status == "pending" else None
+    # A processed suggestion can still receive a private moderator reply.
+    markup = buttons(submission_id) if status == "pending" else status_buttons(submission_id, status)
     for message_id in dict.fromkeys(targets):
         try:
             await safe_edit_reply_markup(bot, target, int(message_id), markup)
@@ -551,12 +552,21 @@ def status_buttons(
             callback_data=f"mod:status:{sub_id}",
             icon_custom_emoji_id=CUSTOM_EMOJIS[icon_name][0],
         )
+        reply_button = InlineKeyboardButton(
+            text="Ответить",
+            callback_data=f"mod:reply:{sub_id}",
+            icon_custom_emoji_id=CUSTOM_EMOJIS["chat"][0],
+        )
     else:
         button = InlineKeyboardButton(
             text=f"{CUSTOM_EMOJIS[icon_name][1]} {label}",
             callback_data=f"mod:status:{sub_id}",
         )
-    return InlineKeyboardMarkup(inline_keyboard=[[button]])
+        reply_button = InlineKeyboardButton(
+            text="💬 Ответить",
+            callback_data=f"mod:reply:{sub_id}",
+        )
+    return InlineKeyboardMarkup(inline_keyboard=[[button], [reply_button]])
 
 
 def moderation_footer(sub, status: str, *, html_safe: bool = False) -> str:
@@ -1455,7 +1465,7 @@ async def group_reply_handler(message: Message, bot: Bot) -> None:
 
 
 async def update_moderation_card(bot: Bot, sub, status: str) -> None:
-    """Update status and ensure all known moderation keyboards match the submission state."""
+    """Update status while keeping the reply action available after a decision."""
     target = moderation_chat_id()
     card_id = sub["admin_card_id"]
     if target is None or not card_id:
@@ -1467,7 +1477,7 @@ async def update_moderation_card(bot: Bot, sub, status: str) -> None:
     except (KeyError, IndexError):
         card_mode = "content"
 
-    markup = buttons(submission_id) if status == "pending" else None
+    markup = buttons(submission_id) if status == "pending" else status_buttons(submission_id, status)
     updated = False
 
     if card_mode in {"control", "album_control"}:
@@ -1741,10 +1751,7 @@ async def moderate(callback: CallbackQuery, bot: Bot) -> None:
         await callback.answer(labels.get(sub["status"], "Заявка обработана."), show_alert=True)
         return
 
-    if sub["status"] != "pending":
-        await callback.answer("Заявка уже обработана.")
-        return
-
+    # Replying is independent of the publication/rejection decision.
     if action == "reply":
         existing = reply_sessions.get(callback.from_user.id)
         if existing and asyncio.get_running_loop().time() < float(existing["deadline"]):
@@ -1789,6 +1796,11 @@ async def moderate(callback: CallbackQuery, bot: Bot) -> None:
             expire_reply_session(bot, callback.from_user.id, sub_id, message.chat.id, prompt.message_id)
         )
         await callback.answer("Ответ открыт. Ответь на подсказку бота или карточку заявки в группе.")
+        return
+
+    # Only the decision actions require a pending suggestion.
+    if sub["status"] != "pending":
+        await callback.answer("Заявка уже обработана.")
         return
 
     if action == "yes":
@@ -1882,14 +1894,14 @@ async def moderate(callback: CallbackQuery, bot: Bot) -> None:
 
 
 async def cleanup_processed_inline_keyboards(bot: Bot) -> None:
-    """Replace stale keyboards on pending cards and remove them from processed submissions."""
+    """Restore action keyboards on pending and processed submissions."""
     target = moderation_chat_id()
     if target is None:
         return
 
-    # Revisit old processed cards once because the previous cleanup marked some
-    # keyboards as cleaned even when Telegram rejected the edit.
-    db.prepare_keyboard_cleanup_version("4")
+    # The new version restores "Reply" on cards previously marked as cleaned
+    # after they were approved or rejected.
+    db.prepare_keyboard_cleanup_version("5")
     cards = db.cards_needing_keyboard_cleanup()
     if not cards:
         logger.info("Inline keyboard cleanup: no cards need checking.")
