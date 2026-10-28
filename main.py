@@ -696,7 +696,7 @@ async def add_publication_disclaimer(
     copied_ids: list[int],
     items,
 ) -> None:
-    """Append the legal disclaimer as a Telegram blockquote to the published post."""
+    """Try adding the disclaimer to the original post; never send another post."""
     caption_types = {"photo", "video", "animation", "document", "audio", "voice"}
     candidates = [
         (index, item)
@@ -705,7 +705,7 @@ async def add_publication_disclaimer(
         or str(item["content_type"] or "") in caption_types
     ]
     # Prefer an existing caption/text if it has room; otherwise use an empty caption
-    # slot in an album before falling back to a reply under the post.
+    # slot in an album. Never send the disclaimer as a separate reply/post.
     candidates.sort(
         key=lambda pair: 0 if str(pair[1]["content_text"] or "").strip() else 1
     )
@@ -752,38 +752,14 @@ async def add_publication_disclaimer(
                 exc,
             )
 
-    # Stickers, round videos, oversized captions, or non-editable posts still get
-    # the disclaimer as a quoted reply so it is never silently omitted.
-    quoted_entities = [
-        MessageEntity(
-            type="blockquote",
-            offset=0,
-            length=utf16_length(PUBLICATION_DISCLAIMER),
-        )
-    ]
-    try:
-        await bot.send_message(
-            chat_id=destination,
-            text=PUBLICATION_DISCLAIMER,
-            entities=quoted_entities,
-            parse_mode=None,
-            reply_parameters=ReplyParameters(
-                message_id=copied_ids[0],
-                allow_sending_without_reply=True,
-            ),
-        )
-    except TelegramAPIError as exc:
-        logger.warning(
-            "Could not attach disclaimer as a reply to message %s; sending it as a separate quoted post: %s",
-            copied_ids[0],
-            exc,
-        )
-        await bot.send_message(
-            chat_id=destination,
-            text=PUBLICATION_DISCLAIMER,
-            entities=quoted_entities,
-            parse_mode=None,
-        )
+    # Telegram cannot fit both the full submission and this disclaimer into
+    # an oversized caption/text. Never create an unwanted second channel post,
+    # and never truncate or overwrite the user's original content.
+    logger.warning(
+        "Publication disclaimer omitted: no editable text/caption can hold it "
+        "(destination=%s, published_message_ids=%s).",
+        destination, copied_ids,
+    )
 
 
 async def copy_submission(
