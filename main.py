@@ -634,9 +634,9 @@ def moderation_body(sub, item, status: str) -> tuple[str, str, list[MessageEntit
     )
 
     if content_type == "text":
-        return ("text", combined, entities) if len(combined) <= 4096 else None
+        return ("text", combined, entities) if utf16_length(combined) <= 4096 else None
     if content_type in {"photo", "video", "animation", "document", "audio", "voice"}:
-        return ("caption", combined, entities) if len(combined) <= 1024 else None
+        return ("caption", combined, entities) if utf16_length(combined) <= 1024 else None
     return None
 
 
@@ -837,7 +837,12 @@ async def copy_submission(
                     sub_id, message_id, exc,
                 )
 
-        if not attached or len(message_ids) > 1:
+        # If Telegram's text/caption limit leaves no room for sender details,
+        # preserve the original content and put those details on a reply card.
+        sender_details_need_card = (
+            len(items) == 1 and moderation_body(sub, items[0], "pending") is None
+        )
+        if not attached or len(message_ids) > 1 or sender_details_need_card:
             # Keep any buttons that worked. Albums also get a dedicated control card because
             # Telegram clients do not render inline keyboards consistently across media groups.
             preview = html.escape(str(sub["quote_text"] or "[Сообщение]")[:700])
