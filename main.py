@@ -62,6 +62,18 @@ PUBLICATION_DISCLAIMER = (
     "or dissemination of personal data"
 )
 
+PUBLICATION_LINKS = (
+    ("Узнать кто выложил пост", "https://t.me/m/4tffwhGJZjU8"),
+    ("Предложить пост", "https://t.me/PozorMgnBot"),
+)
+CHANNEL_PROMOS = {
+    "promo_wait": "жду посты @PozorMgnBot жду посты @PozorMgnBot",
+    "promo_subscribe": (
+        "ПОДПИШИТЕСЬ НА НАШ ПЕРЕХОДНИК в случае сноса тгк туда опубликуем новую "
+        "https://t.me/perehodnikpozora"
+    ),
+}
+
 logger = logging.getLogger("college_suggest")
 router = Router()
 db = Storage(DB_PATH)
@@ -456,12 +468,20 @@ async def refresh_submission_keyboards(bot: Bot, sub, status: str) -> bool:
     return success
 
 
+def channel_promo_rows(sub_id: int) -> list[list[InlineKeyboardButton]]:
+    """Announcements are confirmed before publication to the channel."""
+    return [
+        [InlineKeyboardButton(text="Жду посты", callback_data=f"mod:promo_wait:{sub_id}")],
+        [InlineKeyboardButton(text="Подпишитесь на нас", callback_data=f"mod:promo_subscribe:{sub_id}")],
+    ]
+
+
 def buttons(sub_id: int, *, custom_icons: bool = True) -> InlineKeyboardMarkup:
     if custom_icons:
         rows = [
             [
                 InlineKeyboardButton(
-                    text="Принять",
+                    text="Отправить",
                     callback_data=f"mod:yes:{sub_id}",
                     icon_custom_emoji_id=CUSTOM_EMOJIS["check"][0],
                 ),
@@ -487,7 +507,7 @@ def buttons(sub_id: int, *, custom_icons: bool = True) -> InlineKeyboardMarkup:
     else:
         rows = [
             [
-                InlineKeyboardButton(text="✅ Принять", callback_data=f"mod:yes:{sub_id}"),
+                InlineKeyboardButton(text="✅ Отправить", callback_data=f"mod:yes:{sub_id}"),
                 InlineKeyboardButton(text="❌ Отклонить", callback_data=f"mod:no:{sub_id}"),
             ],
             [
@@ -495,6 +515,7 @@ def buttons(sub_id: int, *, custom_icons: bool = True) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="🚫 Заблокировать", callback_data=f"mod:block:{sub_id}"),
             ],
         ]
+    rows.extend(channel_promo_rows(sub_id))
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -566,7 +587,7 @@ def status_buttons(
             text="💬 Ответить",
             callback_data=f"mod:reply:{sub_id}",
         )
-    return InlineKeyboardMarkup(inline_keyboard=[[button], [reply_button]])
+    return InlineKeyboardMarkup(inline_keyboard=[[button], [reply_button], *channel_promo_rows(sub_id)])
 
 
 def moderation_footer(sub, status: str, *, html_safe: bool = False) -> str:
@@ -690,13 +711,45 @@ def utf16_length(value: str) -> int:
     return len(value.encode("utf-16-le")) // 2
 
 
+def publication_content(
+    original: str,
+    original_entities: list[MessageEntity],
+) -> tuple[str, list[MessageEntity]]:
+    """Preserve source formatting; append quoted disclaimer and two clickable text links."""
+    separator = "\n\n" if original else ""
+    content = original + separator + PUBLICATION_DISCLAIMER
+    entities = list(original_entities)
+    entities.append(
+        MessageEntity(
+            type="blockquote",
+            offset=utf16_length(original + separator),
+            length=utf16_length(PUBLICATION_DISCLAIMER),
+        )
+    )
+    content += "\n\n"
+    for index, (label, url) in enumerate(PUBLICATION_LINKS):
+        if index:
+            content += "\n"
+        offset = utf16_length(content)
+        content += label
+        entities.append(
+            MessageEntity(
+                type="text_link",
+                offset=offset,
+                length=utf16_length(label),
+                url=url,
+            )
+        )
+    return content, entities
+
+
 async def add_publication_disclaimer(
     bot: Bot,
     destination: int | str,
     copied_ids: list[int],
     items,
 ) -> None:
-    """Append the legal disclaimer as a Telegram blockquote to the published post."""
+    """Append attribution links beneath each publication, with reply fallback for unsupported types."""
     caption_types = {"photo", "video", "animation", "document", "audio", "voice"}
     candidates = [
         (index, item)
@@ -704,36 +757,26 @@ async def add_publication_disclaimer(
         if str(item["content_type"] or "") == "text"
         or str(item["content_type"] or "") in caption_types
     ]
-    # Prefer an existing caption/text if it has room; otherwise use an empty caption
-    # slot in an album before falling back to a reply under the post.
     candidates.sort(
         key=lambda pair: 0 if str(pair[1]["content_text"] or "").strip() else 1
     )
 
     for index, item in candidates:
         content_type = str(item["content_type"] or "")
-        original = str(item["content_text"] or "")
-        separator = "\n\n" if original else ""
-        combined = f"{original}{separator}{PUBLICATION_DISCLAIMER}"
+        combined, entities = publication_content(
+            str(item["content_text"] or ""), stored_entities(item)
+        )
         limit = 4096 if content_type == "text" else 1024
         if utf16_length(combined) > limit:
             continue
 
-        entities = stored_entities(item)
-        entities.append(
-            MessageEntity(
-                type="blockquote",
-                offset=utf16_length(original + separator),
-                length=utf16_length(PUBLICATION_DISCLAIMER),
-            )
-        )
         try:
             if content_type == "text":
                 await bot.edit_message_text(
                     chat_id=destination,
                     message_id=copied_ids[index],
                     text=combined,
-                    entities=entities or None,
+                    entities=entities,
                     parse_mode=None,
                 )
             else:
@@ -741,31 +784,25 @@ async def add_publication_disclaimer(
                     chat_id=destination,
                     message_id=copied_ids[index],
                     caption=combined,
-                    caption_entities=entities or None,
+                    caption_entities=entities,
                     parse_mode=None,
                 )
             return
         except TelegramAPIError as exc:
             logger.warning(
-                "Could not append publication disclaimer to message %s: %s",
+                "Could not append publication footer to message %s: %s",
                 copied_ids[index],
                 exc,
             )
 
-    # Stickers, round videos, oversized captions, or non-editable posts still get
-    # the disclaimer as a quoted reply so it is never silently omitted.
-    quoted_entities = [
-        MessageEntity(
-            type="blockquote",
-            offset=0,
-            length=utf16_length(PUBLICATION_DISCLAIMER),
-        )
-    ]
+    # Sticker, video note, oversized captions and non-editable content use a reply.
+    # No original submission content is discarded to make room for the footer.
+    footer, entities = publication_content("", [])
     try:
         await bot.send_message(
             chat_id=destination,
-            text=PUBLICATION_DISCLAIMER,
-            entities=quoted_entities,
+            text=footer,
+            entities=entities,
             parse_mode=None,
             reply_parameters=ReplyParameters(
                 message_id=copied_ids[0],
@@ -774,17 +811,16 @@ async def add_publication_disclaimer(
         )
     except TelegramAPIError as exc:
         logger.warning(
-            "Could not attach disclaimer as a reply to message %s; sending it as a separate quoted post: %s",
+            "Could not attach footer as a reply to post %s; publishing separately: %s",
             copied_ids[0],
             exc,
         )
         await bot.send_message(
             chat_id=destination,
-            text=PUBLICATION_DISCLAIMER,
-            entities=quoted_entities,
+            text=footer,
+            entities=entities,
             parse_mode=None,
         )
-
 
 async def copy_submission(
     bot: Bot,
@@ -1017,12 +1053,12 @@ def render_users_page(offset: int) -> str:
     )
 
 
-def broadcast_confirmation_keyboard() -> InlineKeyboardMarkup:
+def broadcast_confirmation_keyboard(*, channel: bool = False) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="Отправить всем",
+                    text="Опубликовать в канал" if channel else "Отправить всем",
                     callback_data="broadcast:confirm",
                     icon_custom_emoji_id=CUSTOM_EMOJIS["check"][0],
                 ),
@@ -1167,11 +1203,25 @@ async def help_command(message: Message, bot: Bot) -> None:
     )
 
 
-@router.message(Command("users"), F.chat.type.in_({"group", "supergroup"}))
-async def users_command(message: Message, bot: Bot) -> None:
-    if message.chat.id != moderation_chat_id():
-        return
+async def can_view_moderation_stats(message: Message, bot: Bot) -> bool:
+    """Allow moderation-group members and verified group admins in private chat."""
     if not message.from_user:
+        return False
+    if message.chat.id == moderation_chat_id():
+        return True
+    if message.chat.type == "private" and await is_moderation_admin(bot, message.from_user.id):
+        return True
+    await safe_answer(
+        message,
+        "Команда доступна в группе модерации. В личке — только её администраторам. "
+        "Если это группа модерации, проверь MODERATION_CHAT_ID на хостинге.",
+    )
+    return False
+
+
+@router.message(Command("users"))
+async def users_command(message: Message, bot: Bot) -> None:
+    if not await can_view_moderation_stats(message, bot):
         return
     total = db.user_count()
     await safe_answer(
@@ -1186,6 +1236,9 @@ async def done_command(message: Message, bot: Bot) -> None:
     if message.chat.id != moderation_chat_id():
         return
     if not message.from_user:
+        return
+    if not await is_moderation_admin(bot, message.from_user.id):
+        await message.answer("Рассылка доступна только администраторам группы модерации.")
         return
 
     parts = (message.text or "").split(maxsplit=1)
@@ -1246,9 +1299,9 @@ async def done_command(message: Message, bot: Bot) -> None:
     broadcast_sessions[message.from_user.id] = session
 
 
-@router.message(Command("top"), F.chat.type.in_({"group", "supergroup"}))
-async def top_command(message: Message) -> None:
-    if message.chat.id != moderation_chat_id():
+@router.message(Command("top"))
+async def top_command(message: Message, bot: Bot) -> None:
+    if not await can_view_moderation_stats(message, bot):
         return
     rows = db.moderator_top(10)
     medals = ["🥇", "🥈", "🥉"]
@@ -1609,8 +1662,14 @@ async def update_moderation_card(bot: Bot, sub, status: str) -> None:
 @router.callback_query(F.data.startswith("users:"))
 async def users_pagination_callback(callback: CallbackQuery, bot: Bot) -> None:
     message = callback.message
-    if not message or message.chat.id != moderation_chat_id():
-        await callback.answer("Список доступен только в группе модерации.", show_alert=True)
+    if not message or not (
+        message.chat.id == moderation_chat_id()
+        or (
+            message.chat.type == "private"
+            and await is_moderation_admin(bot, callback.from_user.id)
+        )
+    ):
+        await callback.answer("Список доступен только участникам группы модерации.", show_alert=True)
         return
     try:
         _, action, raw_offset = (callback.data or "").split(":")
@@ -1642,6 +1701,9 @@ async def broadcast_callback(callback: CallbackQuery, bot: Bot) -> None:
     if not message or message.chat.id != moderation_chat_id():
         await callback.answer("Рассылка доступна только в группе модерации.", show_alert=True)
         return
+    if not await is_moderation_admin(bot, callback.from_user.id):
+        await callback.answer("Только для администраторов группы.", show_alert=True)
+        return
     session = broadcast_sessions.get(callback.from_user.id)
     if not session or int(session.get("confirm_message_id", 0)) != message.message_id:
         await callback.answer("Эта рассылка уже завершена или устарела.", show_alert=True)
@@ -1659,6 +1721,28 @@ async def broadcast_callback(callback: CallbackQuery, bot: Bot) -> None:
         return
     if action != "confirm":
         await callback.answer("Неизвестное действие.", show_alert=True)
+        return
+
+    if session.get("mode") == "channel":
+        target = destination_chat_id()
+        if target is None or same_chat(target, moderation_chat_id()):
+            await callback.answer("Канал публикации не настроен.", show_alert=True)
+            return
+        try:
+            await safe_bot_send_message(
+                bot, target, html.escape(str(session.get("text", "")))
+            )
+        except TelegramAPIError as exc:
+            logger.warning("Channel announcement failed for %s: %s", target, exc)
+            await callback.answer("Не получилось отправить объявление. Проверь права бота.", show_alert=True)
+            return
+
+        broadcast_sessions.pop(callback.from_user.id, None)
+        await callback.answer("Объявление опубликовано.")
+        try:
+            await safe_edit_text(message, "✅ <b>Объявление опубликовано в канале.</b>", reply_markup=None)
+        except TelegramAPIError:
+            await safe_answer(message, "Объявление опубликовано в канале.")
         return
 
     broadcast_sessions.pop(callback.from_user.id, None)
@@ -1745,6 +1829,43 @@ async def moderate(callback: CallbackQuery, bot: Bot) -> None:
     if message.message_id not in allowed_message_ids:
         await callback.answer("Эта кнопка не относится к карточке заявки.", show_alert=True)
         return
+    if action in CHANNEL_PROMOS:
+        if not await is_moderation_admin(bot, callback.from_user.id):
+            await callback.answer("Отправлять объявления могут только администраторы.", show_alert=True)
+            return
+        target = destination_chat_id()
+        if target is None or same_chat(target, moderation_chat_id()):
+            await callback.answer("Настрой отдельный DESTINATION_CHAT_ID для канала.", show_alert=True)
+            return
+        announcement = CHANNEL_PROMOS[action]
+        try:
+            confirmation = await safe_bot_send_message(
+                bot,
+                chat_id=message.chat.id,
+                text=(
+                    "<b>Опубликовать объявление в канале?</b>\n\n"
+                    f"<blockquote>{html.escape(announcement)}</blockquote>\n\n"
+                    "Подтверди отправку. Сообщение появится в канале для его подписчиков."
+                ),
+                reply_markup=broadcast_confirmation_keyboard(channel=True),
+                reply_parameters=ReplyParameters(
+                    message_id=message.message_id,
+                    allow_sending_without_reply=True,
+                ),
+            )
+        except TelegramAPIError as exc:
+            logger.warning("Could not create announcement confirmation: %s", exc)
+            await callback.answer("Не удалось создать подтверждение.", show_alert=True)
+            return
+        broadcast_sessions[callback.from_user.id] = {
+            "mode": "channel",
+            "text": announcement,
+            "confirm_message_id": confirmation.message_id,
+            "admin_id": callback.from_user.id,
+        }
+        await callback.answer("Подтверди публикацию.")
+        return
+
     if action == "status":
         labels = {
             "published": "Заявка принята и опубликована.",
@@ -1904,9 +2025,8 @@ async def cleanup_processed_inline_keyboards(bot: Bot) -> None:
     if target is None:
         return
 
-    # The new version restores "Reply" on cards previously marked as cleaned
-    # after they were approved or rejected.
-    db.prepare_keyboard_cleanup_version("5")
+    # Refresh processed cards once to expose the new channel-announcement buttons.
+    db.prepare_keyboard_cleanup_version("6")
     cards = db.cards_needing_keyboard_cleanup()
     if not cards:
         logger.info("Inline keyboard cleanup: no cards need checking.")
