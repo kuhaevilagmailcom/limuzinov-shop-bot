@@ -2025,9 +2025,8 @@ async def cleanup_processed_inline_keyboards(bot: Bot) -> None:
     if target is None:
         return
 
-    # The new version restores "Reply" on cards previously marked as cleaned
-    # after they were approved or rejected.
-    db.prepare_keyboard_cleanup_version("5")
+    # Refresh processed cards once to expose the new channel-announcement buttons.
+    db.prepare_keyboard_cleanup_version("6")
     cards = db.cards_needing_keyboard_cleanup()
     if not cards:
         logger.info("Inline keyboard cleanup: no cards need checking.")
