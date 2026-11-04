@@ -1,7 +1,10 @@
 """SQLite storage for submissions, moderation state, and blocked users."""
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
+import time
 from pathlib import Path
 
 
@@ -60,6 +63,18 @@ class Storage:
             );
             CREATE INDEX IF NOT EXISTS bot_users_seen_idx
                 ON bot_users(first_seen_at DESC, user_id DESC);
+            CREATE TABLE IF NOT EXISTS submission_spam_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                fingerprint TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS submission_spam_events_lookup_idx
+                ON submission_spam_events(user_id, fingerprint, created_at);
+            CREATE TABLE IF NOT EXISTS submission_cooldowns (
+                user_id INTEGER PRIMARY KEY,
+                until_ts INTEGER NOT NULL
+            );
         """)
 
         # Add fields when opening databases made by the earlier direct-publication version.
@@ -92,6 +107,10 @@ class Storage:
             self.conn.execute("ALTER TABLE items ADD COLUMN content_text TEXT NOT NULL DEFAULT ''")
         if "entities_json" not in item_columns:
             self.conn.execute("ALTER TABLE items ADD COLUMN entities_json TEXT NOT NULL DEFAULT '[]'")
+        if "content_fingerprint" not in item_columns:
+            self.conn.execute(
+                "ALTER TABLE items ADD COLUMN content_fingerprint TEXT NOT NULL DEFAULT ''"
+            )
 
         # Preserve users already known from submissions and blocks when upgrading an existing database.
         self.conn.execute("""
@@ -120,6 +139,7 @@ class Storage:
         content_type: str = "",
         content_text: str = "",
         entities_json: str = "[]",
+        content_fingerprint: str = "",
     ) -> tuple[int, bool]:
         """Add a message and return (submission id, newly created submission)."""
         with self.conn:
@@ -156,8 +176,8 @@ class Storage:
 
             self.conn.execute(
                 "INSERT INTO items("
-                "submission_id,user_id,message_id,content_type,content_text,entities_json"
-                ") VALUES (?,?,?,?,?,?)",
+                "submission_id,user_id,message_id,content_type,content_text,entities_json,content_fingerprint"
+                ") VALUES (?,?,?,?,?,?,?)",
                 (
                     submission_id,
                     user_id,
@@ -165,6 +185,7 @@ class Storage:
                     content_type,
                     content_text,
                     entities_json,
+                    content_fingerprint,
                 ),
             )
             if quote_text and quote_text.strip():
@@ -174,6 +195,79 @@ class Storage:
                     (quote_text, submission_id),
                 )
             return submission_id, fresh
+
+    def submission_spam_delay(
+        self,
+        submission_id: int,
+        *,
+        now: int | None = None,
+        max_identical: int = 3,
+        cooldown_seconds: int = 5 * 60,
+    ) -> int:
+        """Record one complete post, or return seconds until a user may post again.
+
+        Only accepted posts count towards the limit. A media group is one post,
+        irrespective of how many messages it contains. The check is persisted
+        and protected by SQLite's writer lock so concurrent sends cannot bypass it.
+        """
+        timestamp = int(time.time()) if now is None else int(now)
+        with self.conn:
+            self.conn.execute("BEGIN IMMEDIATE")
+            sub = self.get(submission_id)
+            if not sub:
+                raise ValueError(f"Submission {submission_id} not found")
+            user_id = int(sub["user_id"])
+            cooldown = self.conn.execute(
+                "SELECT until_ts FROM submission_cooldowns WHERE user_id=?",
+                (user_id,),
+            ).fetchone()
+            if cooldown and int(cooldown["until_ts"]) > timestamp:
+                return int(cooldown["until_ts"]) - timestamp
+            if cooldown:
+                self.conn.execute(
+                    "DELETE FROM submission_cooldowns WHERE user_id=?", (user_id,)
+                )
+
+            items = self.conn.execute(
+                "SELECT content_type, content_text, content_fingerprint FROM items "
+                "WHERE submission_id=? ORDER BY message_id ASC",
+                (submission_id,),
+            ).fetchall()
+            if not items:
+                raise ValueError(f"Submission {submission_id} has no items")
+            components = [
+                (str(item["content_type"]),
+                 str(item["content_fingerprint"] or item["content_text"] or ""))
+                for item in items
+            ]
+            fingerprint = hashlib.sha256(
+                json.dumps(components, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+
+            # Keep only the 5-minute rolling window; deleting old rows also
+            # prevents the event table from growing indefinitely.
+            self.conn.execute(
+                "DELETE FROM submission_spam_events WHERE created_at<=?",
+                (timestamp - cooldown_seconds,),
+            )
+            count = self.conn.execute(
+                "SELECT COUNT(*) FROM submission_spam_events "
+                "WHERE user_id=? AND fingerprint=? AND created_at>?",
+                (user_id, fingerprint, timestamp - cooldown_seconds),
+            ).fetchone()[0]
+            if count >= max_identical:
+                self.conn.execute(
+                    "INSERT INTO submission_cooldowns(user_id, until_ts) VALUES (?, ?) "
+                    "ON CONFLICT(user_id) DO UPDATE SET until_ts=excluded.until_ts",
+                    (user_id, timestamp + cooldown_seconds),
+                )
+                return cooldown_seconds
+            self.conn.execute(
+                "INSERT INTO submission_spam_events(user_id, fingerprint, created_at) "
+                "VALUES (?,?,?)",
+                (user_id, fingerprint, timestamp),
+            )
+            return 0
 
     def get(self, submission_id: int) -> sqlite3.Row | None:
         return self.conn.execute(
