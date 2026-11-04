@@ -686,6 +686,38 @@ def quote_preview(message: Message) -> str:
     return value[:700] + ("…" if len(value) > 700 else "")
 
 
+def content_identity(message: Message) -> str:
+    """Stable identity for a post item, independent of Telegram message IDs."""
+    def normalized(value: str) -> str:
+        return " ".join(value.split()).casefold()
+
+    if message.text is not None:
+        return json.dumps(
+            {"type": "text", "text": normalized(message.text)},
+            ensure_ascii=False, sort_keys=True,
+        )
+
+    kind = str(message.content_type)
+    media = getattr(message, kind, None)
+    if isinstance(media, (list, tuple)):
+        media = media[-1] if media else None
+    unique_id = getattr(media, "file_unique_id", None)
+    if unique_id:
+        identity = str(unique_id)
+    elif media is not None and hasattr(media, "model_dump"):
+        # Stable fields for contacts, polls, locations and other non-file media.
+        identity = media.model_dump(
+            exclude_none=True,
+            exclude={"id", "file_id", "file_size", "thumbnail", "thumb"},
+        )
+    else:
+        identity = str(media) if media is not None else ""
+    return json.dumps(
+        {"type": kind, "media": identity, "caption": normalized(message.caption or "")},
+        ensure_ascii=False, sort_keys=True, default=str,
+    )
+
+
 async def safe_notify(bot: Bot, chat_id: int, text: str) -> None:
     try:
         await safe_bot_send_message(
@@ -914,6 +946,18 @@ async def send_to_moderation_group(bot: Bot, sub_id: int) -> None:
     if not target:
         db.move(sub_id, "notifying", "delivery_failed")
         await safe_notify(bot, sub["user_id"], "Не настроена группа для проверки предложений.")
+        return
+
+    # Check once per complete post (including an album), before moderators see it.
+    # Three identical posts are allowed in five minutes; the fourth starts a
+    # persistent five-minute cooldown for the sender.
+    spam_delay = db.submission_spam_delay(sub_id)
+    if spam_delay > 0:
+        db.move(sub_id, "notifying", "spam_rejected")
+        await safe_notify(
+            bot, int(sub["user_id"]),
+            "Без спама, подождите 5 минут и снова отправляйте пост.",
+        )
         return
 
     try:
@@ -1440,6 +1484,7 @@ async def inbox(message: Message, bot: Bot) -> None:
             quote_text=quote_preview(message),
             content_type=message.content_type,
             content_text=message.text if message.text is not None else (message.caption or ""),
+            content_fingerprint=content_identity(message),
             entities_json=json.dumps(
                 [
                     entity.model_dump(exclude_none=True)
