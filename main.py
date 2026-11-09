@@ -63,7 +63,7 @@ PUBLICATION_DISCLAIMER = (
 )
 
 PUBLICATION_LINKS = (
-    ("Узнать кто выложил пост", "https://t.me/m/4tffwhGJZjU8"),
+    ("Удалить пост", "https://t.me/m/4tffwhGJZjU8"),
     ("Предложить пост", "https://t.me/PozorMgnBot"),
 )
 CHANNEL_PROMOS = {
@@ -1511,59 +1511,79 @@ async def inbox(message: Message, bot: Bot) -> None:
 
 @router.message(F.chat.type.in_({"group", "supergroup"}))
 async def group_reply_handler(message: Message, bot: Bot) -> None:
-    # Handle only replies to the active answer prompt or its submission card.
-    if message.chat.id != moderation_chat_id() or not message.from_user:
+    """A simple Telegram reply to a moderation post goes to its original sender."""
+    if (
+        message.chat.id != moderation_chat_id()
+        or not message.from_user
+        or getattr(message.from_user, "is_bot", False)
+    ):
         return
-    session = reply_sessions.get(message.from_user.id)
-    if not session:
-        return
-    prompt_id = int(session["prompt_message_id"])
     replied_to = message.reply_to_message
-    # Accept a reply either to the bot's prompt or directly to the submission card.
-    active_sub = db.get(int(session["sub_id"]))
-    allowed_reply_ids = {prompt_id}
-    if active_sub and active_sub["admin_card_id"]:
-        allowed_reply_ids.add(int(active_sub["admin_card_id"]))
-    if active_sub:
-        allowed_reply_ids.update(db.moderation_message_ids(int(active_sub["id"])))
-    if not replied_to or replied_to.message_id not in allowed_reply_ids:
+    if not replied_to or (message.text and message.text.startswith("/")):
         return
 
-    if asyncio.get_running_loop().time() >= float(session["deadline"]):
-        old_session = clear_reply_session(message.from_user.id)
+    moderator_id = message.from_user.id
+    replied_id = replied_to.message_id
+    session = reply_sessions.get(moderator_id)
+    reply_target = None
+    used_session = False
+
+    # Preserve the existing "Ответить" button and its temporary prompt.
+    # Swiping on a copied post or its control card works without that button.
+    if session:
+        prompt_id = int(session["prompt_message_id"])
+        active_sub = db.get(int(session["sub_id"]))
+        session_message_ids = {prompt_id}
+        if active_sub and active_sub["admin_card_id"]:
+            session_message_ids.add(int(active_sub["admin_card_id"]))
+        if active_sub:
+            session_message_ids.update(db.moderation_message_ids(int(active_sub["id"])))
+        if replied_id in session_message_ids:
+            if asyncio.get_running_loop().time() >= float(session["deadline"]):
+                clear_reply_session(moderator_id)
+                await edit_reply_prompt(
+                    bot,
+                    message.chat.id,
+                    prompt_id,
+                    f"{ce('timer')} <b>Время ответа истекло.</b>",
+                )
+                if replied_id == prompt_id:
+                    return
+            else:
+                reply_target = session
+                used_session = True
+
+    if reply_target is None:
+        # Use the actual replied-to message ID, never text matches or the
+        # moderator's last-opened session, to avoid messaging the wrong user.
+        sub = db.submission_for_moderation_message(replied_id)
+        if not sub:
+            return
+        reply_target = {"sub_id": int(sub["id"]), "user_id": int(sub["user_id"])}
+
+    try:
+        await deliver_group_reply(bot, message, reply_target)
+    except TelegramAPIError as exc:
+        logger.warning(
+            "Could not send group reply from %s to user %s: %s",
+            moderator_id, reply_target["user_id"], exc,
+        )
+        await safe_answer(
+            message,
+            f"{ce('warning')} Не удалось доставить ответ. Возможно, пользователь заблокировал бота. "
+            "Попробуй отправить ответ ещё раз.",
+        )
+        return
+
+    if used_session:
+        old_session = clear_reply_session(moderator_id)
         if old_session:
             await edit_reply_prompt(
                 bot,
                 message.chat.id,
                 int(old_session["prompt_message_id"]),
-                f"{ce('timer')} <b>Время ответа истекло.</b>",
+                f"{ce('check')} <b>Ответ отправлен пользователю.</b>",
             )
-        return
-
-    try:
-        await deliver_group_reply(bot, message, session)
-    except TelegramAPIError as exc:
-        logger.warning(
-            "Could not send group reply from %s to user %s: %s",
-            message.from_user.id,
-            session.get("user_id"),
-            exc,
-        )
-        await safe_answer(
-            message,
-            f"{ce('warning')} Не удалось доставить ответ. Возможно, пользователь заблокировал бота. "
-            "Режим ответа остаётся активным — попробуй ещё раз."
-        )
-        return
-
-    old_session = clear_reply_session(message.from_user.id)
-    if old_session:
-        await edit_reply_prompt(
-            bot,
-            message.chat.id,
-            int(old_session["prompt_message_id"]),
-            f"{ce('check')} <b>Ответ отправлен пользователю.</b>",
-        )
     await safe_answer(message, f"{ce('check')} Ответ отправлен пользователю.")
 
 
