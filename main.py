@@ -1163,6 +1163,7 @@ async def expire_reply_session(
 
 
 async def deliver_group_reply(bot: Bot, message: Message, session: dict[str, object]) -> None:
+    """Reply in private to the original author, falling back from stale reply IDs."""
     target_user_id = int(session["user_id"])
     source_ids = db.message_ids(int(session["sub_id"]))
     reply_parameters = (
@@ -1170,24 +1171,36 @@ async def deliver_group_reply(bot: Bot, message: Message, session: dict[str, obj
         if source_ids else None
     )
 
+    async def send_with_optional_reply(send, **kwargs):
+        if reply_parameters is None:
+            return await send(**kwargs)
+        try:
+            return await send(reply_parameters=reply_parameters, **kwargs)
+        except TelegramBadRequest as exc:
+            # Some old user messages are no longer valid Telegram reply targets.
+            # Do not lose the moderator's response because of the quote.
+            logger.info(
+                "Reply reference for submission %s is unavailable; trying without it: %s",
+                session["sub_id"], exc,
+            )
+            return await send(**kwargs)
+
     if message.text is not None:
         combined = f"{ce('chat')} <b>Ответ на твоё предложение</b>\n\n{html.escape(message.text)}"
         if len(combined) <= 3900:
-            await safe_bot_send_message(
-                bot,
-                target_user_id,
-                combined,
-                reply_parameters=reply_parameters,
+            await send_with_optional_reply(
+                lambda **kwargs: safe_bot_send_message(bot, target_user_id, combined, **kwargs)
             )
             return
 
-    await bot.copy_message(
-        chat_id=target_user_id,
-        from_chat_id=message.chat.id,
-        message_id=message.message_id,
-        reply_parameters=reply_parameters,
+    await send_with_optional_reply(
+        lambda **kwargs: bot.copy_message(
+            chat_id=target_user_id,
+            from_chat_id=message.chat.id,
+            message_id=message.message_id,
+            **kwargs,
+        )
     )
-
 
 @router.message(CommandStart(), F.chat.type == "private")
 async def start(message: Message, bot: Bot) -> None:
@@ -1509,28 +1522,73 @@ async def inbox(message: Message, bot: Bot) -> None:
         await send_to_moderation_group(bot, sub_id)
 
 
+def replied_moderation_message_id(message: Message) -> int | None:
+    """Extract target message ID from normal and cross-topic Telegram replies."""
+    original = getattr(message, "reply_to_message", None)
+    if original is not None:
+        return int(original.message_id)
+    external = getattr(message, "external_reply", None)
+    external_chat = getattr(external, "chat", None)
+    if (
+        external is not None
+        and external_chat is not None
+        and same_chat(getattr(external_chat, "id", None), message.chat.id)
+        and getattr(external, "message_id", None) is not None
+    ):
+        return int(external.message_id)
+    return None
+
+
+def submission_for_reply_target(replied_id: int, replied_to_message=None):
+    """Resolve a suggestion even if its older message-ID mapping is missing."""
+    sub = db.submission_for_moderation_message(replied_id)
+    if sub:
+        return sub
+    markup = getattr(replied_to_message, "reply_markup", None)
+    if markup is None:
+        return None
+    for row in getattr(markup, "inline_keyboard", ()) or ():
+        for button in row:
+            data = getattr(button, "callback_data", "") or ""
+            parts = data.split(":")
+            if len(parts) == 3 and parts[0] == "mod" and parts[2].isdigit():
+                found = db.get(int(parts[2]))
+                if found:
+                    logger.info("Recovered suggestion %s from reply keyboard", found["id"])
+                    return found
+    return None
+
+
 @router.message(F.chat.type.in_({"group", "supergroup"}))
 async def group_reply_handler(message: Message, bot: Bot) -> None:
-    """A simple Telegram reply to a moderation post goes to its original sender."""
-    if (
-        message.chat.id != moderation_chat_id()
-        or not message.from_user
-        or getattr(message.from_user, "is_bot", False)
-    ):
-        return
-    replied_to = message.reply_to_message
-    incoming_text = getattr(message, "text", None)
-    if not replied_to or (incoming_text and incoming_text.startswith("/")):
+    """Send a swipe reply on a moderation post to its author without any button."""
+    if not same_chat(message.chat.id, moderation_chat_id()):
         return
 
-    moderator_id = message.from_user.id
-    replied_id = replied_to.message_id
-    session = reply_sessions.get(moderator_id)
+    # Telegram represents anonymous group admins with a synthetic bot user.
+    # They should be able to reply too, but ignore actual other bots to avoid loops.
+    sender = getattr(message, "from_user", None)
+    sender_chat = getattr(message, "sender_chat", None)
+    anonymous_admin = (
+        sender_chat is not None
+        and same_chat(getattr(sender_chat, "id", None), message.chat.id)
+    )
+    if (
+        not anonymous_admin
+        and (not sender or getattr(sender, "is_bot", False))
+    ) or getattr(message, "is_automatic_forward", False):
+        return
+
+    incoming_text = getattr(message, "text", None)
+    replied_id = replied_moderation_message_id(message)
+    if replied_id is None or (incoming_text and incoming_text.startswith("/")):
+        return
+
+    moderator_id = getattr(sender, "id", 0) if not anonymous_admin else 0
+    session = reply_sessions.get(moderator_id) if moderator_id else None
     reply_target = None
     used_session = False
 
-    # Preserve the existing "Ответить" button and its temporary prompt.
-    # Swiping on a copied post or its control card works without that button.
     if session:
         prompt_id = int(session["prompt_message_id"])
         active_sub = db.get(int(session["sub_id"]))
@@ -1543,9 +1601,7 @@ async def group_reply_handler(message: Message, bot: Bot) -> None:
             if asyncio.get_running_loop().time() >= float(session["deadline"]):
                 clear_reply_session(moderator_id)
                 await edit_reply_prompt(
-                    bot,
-                    message.chat.id,
-                    prompt_id,
+                    bot, message.chat.id, prompt_id,
                     f"{ce('timer')} <b>Время ответа истекло.</b>",
                 )
                 if replied_id == prompt_id:
@@ -1555,10 +1611,25 @@ async def group_reply_handler(message: Message, bot: Bot) -> None:
                 used_session = True
 
     if reply_target is None:
-        # Use the actual replied-to message ID, never text matches or the
-        # moderator's last-opened session, to avoid messaging the wrong user.
-        sub = db.submission_for_moderation_message(replied_id)
+        sub = submission_for_reply_target(
+            replied_id, getattr(message, "reply_to_message", None)
+        )
         if not sub:
+            logger.info(
+                "Cannot route moderator reply: chat=%s reply_to=%s moderator=%s",
+                message.chat.id, replied_id, moderator_id,
+            )
+            # Show an actionable error only if a user replied to this bot's
+            # message; unrelated group conversations should be left alone.
+            original_sender = getattr(
+                getattr(message, "reply_to_message", None), "from_user", None
+            )
+            if original_sender and getattr(original_sender, "id", None) == getattr(bot, "id", None):
+                await safe_answer(
+                    message,
+                    f"{ce('warning')} Не нашёл заявку для этого сообщения. "
+                    "Попробуй ответить на сам пост с кнопками или отправь новую заявку.",
+                )
             return
         reply_target = {"sub_id": int(sub["id"]), "user_id": int(sub["user_id"])}
 
@@ -1566,13 +1637,13 @@ async def group_reply_handler(message: Message, bot: Bot) -> None:
         await deliver_group_reply(bot, message, reply_target)
     except TelegramAPIError as exc:
         logger.warning(
-            "Could not send group reply from %s to user %s: %s",
-            moderator_id, reply_target["user_id"], exc,
+            "Could not send reply from moderator %s to user %s for submission %s: %s",
+            moderator_id, reply_target["user_id"], reply_target["sub_id"], exc,
         )
         await safe_answer(
             message,
-            f"{ce('warning')} Не удалось доставить ответ. Возможно, пользователь заблокировал бота. "
-            "Попробуй отправить ответ ещё раз.",
+            f"{ce('warning')} Ответ пользователю не доставлен: "
+            f"{html.escape(str(exc))[:250]}. Попробуй ещё раз.",
         )
         return
 
@@ -1580,13 +1651,10 @@ async def group_reply_handler(message: Message, bot: Bot) -> None:
         old_session = clear_reply_session(moderator_id)
         if old_session:
             await edit_reply_prompt(
-                bot,
-                message.chat.id,
-                int(old_session["prompt_message_id"]),
+                bot, message.chat.id, int(old_session["prompt_message_id"]),
                 f"{ce('check')} <b>Ответ отправлен пользователю.</b>",
             )
     await safe_answer(message, f"{ce('check')} Ответ отправлен пользователю.")
-
 
 async def update_moderation_card(bot: Bot, sub, status: str) -> None:
     """Update status while keeping the reply action available after a decision."""
