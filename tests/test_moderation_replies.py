@@ -233,5 +233,91 @@ class SwipeReplyTests(unittest.IsolatedAsyncioTestCase):
                 notify.assert_not_awaited()
 
 
+class ResilientSwipeReplyTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.storage = Storage(str(Path(self.tmp.name) / "reply-tests.sqlite3"))
+        self.sub_id, _ = self.storage.add(
+            user_id=731, full_name="Sender", username=None,
+            message_id=71, album_key=None, content_type="text",
+            content_text="Sample",
+        )
+        self.storage.set_moderation_message_ids(self.sub_id, [501])
+        self.storage.move(self.sub_id, "collecting", "notifying")
+        self.storage.set_card_pending(self.sub_id, 501)
+
+    async def asyncTearDown(self):
+        self.storage.close()
+        self.tmp.cleanup()
+
+    async def test_anonymous_moderator_can_swipe_reply(self):
+        message = SimpleNamespace(
+            from_user=SimpleNamespace(id=1087968824, is_bot=True),
+            sender_chat=SimpleNamespace(id=-100222),
+            is_automatic_forward=False,
+            chat=SimpleNamespace(id=-100222),
+            reply_to_message=SimpleNamespace(message_id=501),
+            text="Спасибо за заявку",
+        )
+        with patch.object(app, "db", self.storage), \
+             patch.object(app, "moderation_chat_id", return_value=-100222), \
+             patch.object(app, "deliver_group_reply", new=AsyncMock()) as deliver, \
+             patch.object(app, "safe_answer", new=AsyncMock()) as confirm:
+            await app.group_reply_handler(message, object())
+        deliver.assert_awaited_once()
+        self.assertEqual(deliver.await_args.args[2]["user_id"], 731)
+        confirm.assert_awaited_once()
+
+    async def test_external_cross_topic_reply_resolves_its_target(self):
+        message = SimpleNamespace(
+            from_user=SimpleNamespace(id=42, is_bot=False),
+            sender_chat=None,
+            is_automatic_forward=False,
+            chat=SimpleNamespace(id=-100222),
+            reply_to_message=None,
+            external_reply=SimpleNamespace(
+                chat=SimpleNamespace(id=-100222),
+                message_id=501,
+            ),
+            text="Ответ",
+        )
+        with patch.object(app, "db", self.storage), \
+             patch.object(app, "moderation_chat_id", return_value=-100222), \
+             patch.object(app, "deliver_group_reply", new=AsyncMock()) as deliver, \
+             patch.object(app, "safe_answer", new=AsyncMock()):
+            await app.group_reply_handler(message, object())
+        deliver.assert_awaited_once()
+        self.assertEqual(deliver.await_args.args[2]["user_id"], 731)
+
+    async def test_reply_lookup_can_recover_from_old_keyboard(self):
+        markup = app.buttons(self.sub_id, custom_icons=False)
+        referenced = SimpleNamespace(message_id=999, reply_markup=markup)
+        with patch.object(app, "db", self.storage):
+            sub = app.submission_for_reply_target(999, referenced)
+        self.assertEqual(sub["user_id"], 731)
+
+    async def test_private_reply_falls_back_when_original_message_was_deleted(self):
+        from aiogram.exceptions import TelegramBadRequest
+        message = SimpleNamespace(
+            text="Привет",
+            chat=SimpleNamespace(id=-100222),
+            message_id=801,
+        )
+        bot = SimpleNamespace()
+        send = AsyncMock(side_effect=[
+            TelegramBadRequest(method=SimpleNamespace(__str__=lambda self: "sendMessage"),
+                               message="Bad Request: message to be replied not found"),
+            SimpleNamespace(message_id=300),
+        ])
+        with patch.object(app, "db", self.storage), \
+             patch.object(app, "safe_bot_send_message", send):
+            await app.deliver_group_reply(
+                bot, message, {"user_id": 731, "sub_id": self.sub_id},
+            )
+        self.assertEqual(send.await_count, 2)
+        self.assertIn("reply_parameters", send.await_args_list[0].kwargs)
+        self.assertNotIn("reply_parameters", send.await_args_list[1].kwargs)
+
+
 if __name__ == "__main__":
     unittest.main()
