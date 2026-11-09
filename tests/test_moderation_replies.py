@@ -130,5 +130,108 @@ class ProcessedSuggestionReplyTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn(999, app.reply_sessions)
 
 
+class SwipeReplyTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = Storage(str(Path(self.tmp.name) / "swipe.sqlite3"))
+
+    def tearDown(self):
+        for moderator_id in list(app.reply_sessions):
+            app.clear_reply_session(moderator_id)
+        self.db.close()
+        self.tmp.cleanup()
+
+    def make_submission(self, user_id, message_id, copied_id, card_id, status="pending"):
+        sid, _ = self.db.add(
+            user_id=user_id, full_name="Sender", username=None,
+            message_id=message_id, album_key=None, content_type="text",
+            content_text="Hello",
+        )
+        self.db.set_moderation_message_ids(sid, [copied_id])
+        self.db.move(sid, "collecting", "notifying")
+        self.db.set_card_pending(sid, card_id)
+        if status != "pending":
+            self.db.move(sid, "pending", status)
+        return sid
+
+    async def send_swipe(self, replied_id, *, moderator_id=999, chat_id=-100222, text="Answer"):
+        message = SimpleNamespace(
+            chat=SimpleNamespace(id=chat_id),
+            from_user=SimpleNamespace(id=moderator_id, is_bot=False),
+            reply_to_message=SimpleNamespace(message_id=replied_id),
+            text=text,
+        )
+        with patch.object(app, "db", self.db), \
+             patch.object(app, "moderation_chat_id", return_value=-100222), \
+             patch.object(app, "deliver_group_reply", new=AsyncMock()) as deliver, \
+             patch.object(app, "safe_answer", new=AsyncMock()) as notify, \
+             patch.object(app, "edit_reply_prompt", new=AsyncMock()):
+            await app.group_reply_handler(message, object())
+        return deliver, notify
+
+    async def test_swipe_without_button_works_before_and_after_decision(self):
+        for index, status in enumerate(("pending", "published", "rejected", "blocked")):
+            with self.subTest(status=status):
+                sid = self.make_submission(
+                    user_id=400 + index,
+                    message_id=20 + index,
+                    copied_id=300 + index,
+                    card_id=500 + index,
+                    status=status,
+                )
+                self.assertEqual(app.reply_sessions, {})
+                deliver, notify = await self.send_swipe(300 + index)
+                deliver.assert_awaited_once()
+                self.assertEqual(deliver.await_args.args[2]["sub_id"], sid)
+                self.assertEqual(deliver.await_args.args[2]["user_id"], 400 + index)
+                notify.assert_awaited_once()
+
+    async def test_swipe_on_control_card_or_any_album_item(self):
+        sid, _ = self.db.add(
+            user_id=700, full_name="Album user", username=None,
+            message_id=61, album_key="album-1", content_type="photo",
+        )
+        self.db.add(
+            user_id=700, full_name="Album user", username=None,
+            message_id=62, album_key="album-1", content_type="photo",
+        )
+        self.db.set_moderation_message_ids(sid, [601, 602])
+        self.db.move(sid, "collecting", "notifying")
+        self.db.set_card_pending(sid, 603, "album_control")
+        for replied_id in (601, 602, 603):
+            with self.subTest(replied_id=replied_id):
+                deliver, _ = await self.send_swipe(replied_id)
+                deliver.assert_awaited_once()
+                self.assertEqual(deliver.await_args.args[2]["user_id"], 700)
+
+    async def test_swipe_to_other_post_ignores_open_reply_session(self):
+        first = self.make_submission(801, 81, 811, 812)
+        second = self.make_submission(901, 91, 911, 912)
+        app.reply_sessions[999] = {
+            "sub_id": first, "user_id": 801,
+            "prompt_message_id": 9999,
+            "deadline": asyncio.get_running_loop().time() + 300,
+        }
+        deliver, _ = await self.send_swipe(911)
+        deliver.assert_awaited_once()
+        self.assertEqual(deliver.await_args.args[2]["sub_id"], second)
+        self.assertEqual(deliver.await_args.args[2]["user_id"], 901)
+        self.assertEqual(app.reply_sessions[999]["sub_id"], first)
+
+    async def test_unrelated_replies_and_commands_are_not_forwarded(self):
+        self.make_submission(800, 80, 810, 820)
+        for msg_id, chat_id, text_value in (
+            (99999, -100222, "Not a suggestion"),
+            (810, -100999, "Other group"),
+            (810, -100222, "/cleanbuttons"),
+        ):
+            with self.subTest(msg_id=msg_id, chat_id=chat_id, text=text_value):
+                deliver, notify = await self.send_swipe(
+                    msg_id, chat_id=chat_id, text=text_value
+                )
+                deliver.assert_not_awaited()
+                notify.assert_not_awaited()
+
+
 if __name__ == "__main__":
     unittest.main()
