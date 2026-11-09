@@ -358,6 +358,19 @@ class Storage:
             )
         ]
 
+    def submission_for_moderation_message(self, moderation_message_id: int) -> sqlite3.Row | None:
+        """Find the suggestion whose copied content or control card was replied to."""
+        item = self.conn.execute(
+            "SELECT submission_id FROM items WHERE moderation_message_id=? LIMIT 1",
+            (moderation_message_id,),
+        ).fetchone()
+        if item:
+            return self.get(int(item["submission_id"]))
+        return self.conn.execute(
+            "SELECT * FROM submissions WHERE admin_card_id=? ORDER BY id DESC LIMIT 1",
+            (moderation_message_id,),
+        ).fetchone()
+
     def remember_primary_moderation_message_id(
         self, submission_id: int, moderation_message_id: int
     ) -> None:
