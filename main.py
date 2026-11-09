@@ -1519,7 +1519,8 @@ async def group_reply_handler(message: Message, bot: Bot) -> None:
     ):
         return
     replied_to = message.reply_to_message
-    if not replied_to or (message.text and message.text.startswith("/")):
+    incoming_text = getattr(message, "text", None)
+    if not replied_to or (incoming_text and incoming_text.startswith("/")):
         return
 
     moderator_id = message.from_user.id
