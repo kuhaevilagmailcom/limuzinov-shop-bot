@@ -42,6 +42,13 @@ class PostFooterTests(unittest.TestCase):
             self.assertEqual(entity_text(content, entity), label)
             self.assertEqual(entity.url, url)
 
+    def test_removal_link_keeps_its_original_destination(self):
+        self.assertEqual(
+            app.PUBLICATION_LINKS[0],
+            ("Удалить пост", "https://t.me/m/4tffwhGJZjU8"),
+        )
+        self.assertEqual(app.PUBLICATION_LINKS[1][0], "Предложить пост")
+
     def test_moderation_keyboards_keep_review_actions_and_announcements(self):
         pending = app.buttons(123)
         processed = app.status_buttons(123, "published")
