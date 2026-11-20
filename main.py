@@ -1514,6 +1514,16 @@ async def reconcile_removal_payments(bot: Bot) -> None:
                         await safe_notify(bot, int(ticket['user_id']), f"Оплата подтверждена. Билет в розыгрыш «{html.escape(str(ticket['title']))}» получен.")
                     elif status in {'expired', 'canceled', 'cancelled', 'failed'}: db.set_giveaway_ticket_status(str(ticket['payment_id']), status)
                 except (RollyPayError, InvalidOperation, TypeError, ValueError) as exc: logger.warning('Ticket reconciliation failed: %s', exc)
+            for invoice in db.pending_invoices():
+                try:
+                    remote = await get_payment(api_base=ROLLYPAY_API_BASE, api_key=ROLLYPAY_API_KEY, payment_id=str(invoice['payment_id']))
+                    status = str(remote.get('status') or '').lower()
+                    if status == 'paid' and str(remote.get('order_id')) == str(invoice['order_id']) and Decimal(str(remote.get('amount'))) == Decimal(int(invoice['amount_rub'])) and str(remote.get('currency') or remote.get('payment_currency') or '').upper() == 'RUB':
+                        db.set_invoice_status(str(invoice['payment_id']), 'paid')
+                        await safe_notify(bot, int(invoice['buyer_user_id']), 'Оплата по счёту подтверждена.')
+                        await safe_notify(bot, int(invoice['created_by_id']), f"Счёт для <code>{invoice['buyer_user_id']}</code> оплачен.")
+                    elif status in {'expired', 'canceled', 'cancelled', 'failed'}: db.set_invoice_status(str(invoice['payment_id']), status)
+                except (RollyPayError, InvalidOperation, TypeError, ValueError) as exc: logger.warning('Invoice reconciliation failed: %s', exc)
         await asyncio.sleep(12)
 
 @router.message(CommandStart(), F.chat.type == "private")
