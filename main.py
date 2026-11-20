@@ -57,6 +57,7 @@ PUBLIC_SITE_BASE_URL = os.getenv("PUBLIC_SITE_BASE_URL", "https://mgnvpn.ru").rs
 PUBLIC_BOT_USERNAME = os.getenv("PUBLIC_BOT_USERNAME", "PozorMgnBot").strip().lstrip("@")
 DEFAULT_REMOVAL_PRICE_RUB = 100
 DEFAULT_AUTHOR_INFO_PRICE_RUB = 100
+OWNER_USER_IDS = {8464597898}
 
 POST_ACTION_BUTTONS = {"Удалить пост": "post_removal", "Узнать, кто выложил": "author_lookup"}
 POST_ACTION_KEYBOARD = ReplyKeyboardMarkup(
@@ -221,6 +222,8 @@ async def is_blocked_from_suggestions(bot: Bot, user_id: int) -> bool:
 
 async def is_moderation_admin(bot: Bot, user_id: int) -> bool:
     """Only Telegram administrators of the configured moderation group can use admin tools."""
+    if user_id in OWNER_USER_IDS:
+        return True
     group_id = moderation_chat_id()
     if group_id is None:
         return False
@@ -1405,6 +1408,17 @@ async def process_post_link(message: Message, bot: Bot, action: str) -> bool:
         await message.answer(str(exc) + "\n\nНапример: <code>https://t.me/c/1234567890/123</code>")
         return False
     if sub is None:
+        if action == "post_removal" and message.from_user and message.from_user.id in OWNER_USER_IDS:
+            _, message_id = parse_post_link(message.text.strip())
+            chat_id = destination_chat_id()
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=message_id)
+            except TelegramAPIError as exc:
+                logger.warning("Owner direct deletion failed for %s: %s", message_id, exc)
+                await message.answer("Не удалось удалить этот пост. Проверь ссылку и права бота администратора в канале.")
+                return False
+            await message.answer("Пост удалён.")
+            return True
         await message.answer(
             "Не нашёл этот пост среди публикаций бота. Проверь ссылку. "
             "Если пост старый, данные о нём могли не сохраниться после пересборки."
@@ -1723,6 +1737,8 @@ async def can_view_moderation_stats(message: Message, bot: Bot) -> bool:
     """Allow moderation-group members and verified group admins in private chat."""
     if not message.from_user:
         return False
+    if message.from_user.id in OWNER_USER_IDS:
+        return True
     if message.chat.id == moderation_chat_id():
         return True
     if message.chat.type == "private" and await is_moderation_admin(bot, message.from_user.id):
