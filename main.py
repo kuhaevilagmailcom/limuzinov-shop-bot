@@ -1532,6 +1532,53 @@ async def delete_published_submission(bot: Bot, sub, message_ids: list[int]) -> 
         logger.warning("Could not delete older publication through channel admin: %s", exc)
         return False
 
+async def reconcile_legacy_removal_payments(bot: Bot) -> None:
+    """Fulfill paid deletions of old/untracked channel posts."""
+    while True:
+        if ROLLYPAY_API_KEY:
+            for payment in db.pending_legacy_removal_payments():
+                payment_id = str(payment["payment_id"])
+                try:
+                    remote = await get_payment(
+                        api_base=ROLLYPAY_API_BASE, api_key=ROLLYPAY_API_KEY,
+                        payment_id=payment_id,
+                    )
+                    status = str(remote.get("status") or "").lower()
+                    if status == "paid":
+                        currency = str(remote.get("currency") or remote.get("payment_currency") or "").upper()
+                        amount = Decimal(str(remote.get("amount")))
+                        if (
+                            str(remote.get("payment_id")) != payment_id
+                            or str(remote.get("order_id")) != str(payment["order_id"])
+                            or currency != "RUB"
+                            or amount != Decimal(int(payment["amount_rub"]))
+                            or (bool(remote.get("test")) and not ROLLYPAY_TEST_MODE)
+                        ):
+                            logger.error("Old post removal payment mismatch for %s", payment_id)
+                            continue
+                        expected = destination_chat_id()
+                        if not isinstance(expected, int):
+                            expected = (await bot.get_chat(expected)).id
+                        chat_id = int(payment["chat_id"])
+                        if chat_id != int(expected):
+                            logger.error("Old post removal payment targets foreign channel: %s", payment_id)
+                            continue
+                        ids = tuple(int(x) for x in json.loads(payment["message_ids_json"]))
+                        if await delete_verified_target(chat_id, ids):
+                            db.mark_legacy_removal_payment(payment_id, "paid")
+                            await safe_notify(
+                                bot, int(payment["buyer_user_id"]),
+                                f"{ce('check')} Оплата подтверждена. Пост удалён из канала.",
+                            )
+                    elif status in {"expired", "failed", "canceled", "cancelled"}:
+                        db.mark_legacy_removal_payment(payment_id, status)
+                except (RollyPayError, AdminDeletionUnavailable, TelegramAPIError,
+                        InvalidOperation, TypeError, ValueError, json.JSONDecodeError) as exc:
+                    logger.warning("Old post paid deletion retry needed for %s: %s", payment_id, exc)
+                await asyncio.sleep(0.05)
+        await asyncio.sleep(12)
+
+
 async def deliver_author_info(bot: Bot, payment) -> None:
     """Send paid identity details only after consent and payment verification."""
     if not may_disclose_author(payment):
@@ -2895,12 +2942,15 @@ async def main() -> None:
         await cleanup_processed_inline_keyboards(bot)
         recovery_job = asyncio.create_task(recover(bot))
         removal_reconcile_job = asyncio.create_task(reconcile_removal_payments(bot))
+        legacy_reconcile_job = asyncio.create_task(reconcile_legacy_removal_payments(bot))
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
         if "recovery_job" in locals():
             recovery_job.cancel()
         if "removal_reconcile_job" in locals():
             removal_reconcile_job.cancel()
+        if "legacy_reconcile_job" in locals():
+            legacy_reconcile_job.cancel()
         for job in album_jobs.values():
             job.cancel()
         for job in reply_jobs.values():
