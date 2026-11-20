@@ -1540,6 +1540,10 @@ async def start(message: Message, bot: Bot) -> None:
     if len(payload) == 2:
         match = re.fullmatch(r"remove_(\d+)_([A-Za-z0-9_-]{12,40})", payload[1].strip())
         if match:
+            await message.answer(
+                "В боте доступны два действия с постами по ссылке.",
+                reply_markup=POST_ACTION_KEYBOARD,
+            )
             await start_removal_payment(message, int(match.group(1)), match.group(2))
             return
     if await is_blocked_from_suggestions(bot, message.from_user.id):
