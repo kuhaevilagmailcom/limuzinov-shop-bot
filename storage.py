@@ -836,6 +836,9 @@ class Storage:
     def giveaway(self, giveaway_id: int) -> sqlite3.Row | None:
         return self.conn.execute("SELECT * FROM giveaways WHERE id=?", (giveaway_id,)).fetchone()
 
+    def active_giveaway(self) -> sqlite3.Row | None:
+        return self.conn.execute("SELECT * FROM giveaways WHERE status='active' ORDER BY id DESC LIMIT 1").fetchone()
+
     def create_giveaway_ticket(self, payment_id: str, order_id: str, giveaway_id: int, user_id: int, amount: int, quantity: int = 1) -> None:
         with self.conn:
             self.conn.execute("INSERT INTO giveaway_tickets(payment_id,giveaway_id,user_id,order_id,amount_rub,quantity) VALUES(?,?,?,?,?,?)", (payment_id, giveaway_id, user_id, order_id, amount, quantity))

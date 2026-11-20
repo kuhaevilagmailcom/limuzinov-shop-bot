@@ -110,6 +110,7 @@ album_jobs: dict[tuple[int, str], asyncio.Task] = {}
 reply_sessions: dict[int, dict[str, object]] = {}
 reply_jobs: dict[int, asyncio.Task] = {}
 broadcast_sessions: dict[int, dict[str, object]] = {}
+admin_sessions: dict[int, str] = {}
 USERS_PAGE_SIZE = 10
 resolved_destination_chat_id: int | None = None
 resolved_moderation_chat_id: int | None = None
@@ -1084,9 +1085,7 @@ async def configure_commands(bot: Bot) -> None:
                     BotCommand(command="setdeleteprice", description="Цена удаления поста"),
                     BotCommand(command="setinfoprice", description="Цена сведений об авторе"),
                     BotCommand(command="invoice", description="Создать счёт пользователю"),
-                    BotCommand(command="setticketprice", description="Цена билета розыгрыша"),
-                    BotCommand(command="giveaway", description="Создать розыгрыш"),
-                    BotCommand(command="drawgiveaway", description="Выбрать победителя"),
+                    BotCommand(command="admin", description="Админ-меню"),
                     BotCommand(command="cleanbuttons", description="Убрать старые кнопки с сообщения"),
                 ],
                 scope=BotCommandScopeChat(chat_id=moderation_id),
@@ -1550,6 +1549,24 @@ async def start(message: Message, bot: Bot) -> None:
             message.from_user.username,
             message.from_user.full_name,
         )
+
+    admin_mode = admin_sessions.get(sender_id)
+    if admin_mode and await is_moderation_admin(bot, sender_id):
+        value = (message.text or "").strip()
+        if admin_mode == "ticket_price":
+            if not value.isdigit() or not 1 <= int(value) <= 100000:
+                await message.answer("Пришли цену целым числом от 1 до 100000."); return
+            db.set_setting("giveaway_ticket_price_rub", value)
+            admin_sessions.pop(sender_id, None)
+            await message.answer(f"Цена билета: <b>{value} ₽</b>."); return
+        if admin_mode == "giveaway_title":
+            if not value or len(value) > 180:
+                await message.answer("Пришли название приза до 180 символов."); return
+            giveaway_id = db.create_giveaway(value, ticket_price_rub(), sender_id, message.chat.id)
+            admin_sessions.pop(sender_id, None)
+            card = await message.answer(giveaway_card(giveaway_id), reply_markup=giveaway_keyboard(giveaway_id))
+            db.set_giveaway_message(giveaway_id, card.message_id)
+            return
     payload = (message.text or "").split(maxsplit=1)
     if len(payload) == 2:
         match = re.fullmatch(r"remove_(\d+)_([A-Za-z0-9_-]{12,40})", payload[1].strip())
@@ -1655,6 +1672,69 @@ def giveaway_keyboard(giveaway_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="Купить 1 билет", callback_data=f"giveaway:buy:{giveaway_id}:1"), InlineKeyboardButton(text="5 билетов", callback_data=f"giveaway:buy:{giveaway_id}:5")],
         [InlineKeyboardButton(text="Мои билеты", callback_data=f"giveaway:mine:{giveaway_id}"), InlineKeyboardButton(text="Статистика", callback_data=f"giveaway:stats:{giveaway_id}")],
     ])
+
+
+def giveaway_card(giveaway_id: int) -> str:
+    giveaway = db.giveaway(giveaway_id)
+    stats = db.giveaway_stats(giveaway_id)
+    return (
+        f"<b>🎁 Розыгрыш #{giveaway_id}</b>\n{html.escape(str(giveaway['title']))}\n\n"
+        f"🎟 Билет: <b>{giveaway['ticket_price_rub']} ₽</b>\n"
+        f"👥 Участников: <b>{stats['buyers']}</b>\n"
+        f"🎫 Билетов: <b>{stats['tickets']}</b>"
+    )
+
+
+def admin_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎁 Создать розыгрыш", callback_data="gadmin:create"), InlineKeyboardButton(text="🎟 Цена билета", callback_data="gadmin:price")],
+        [InlineKeyboardButton(text="📢 Опубликовать в канал", callback_data="gadmin:publish"), InlineKeyboardButton(text="📨 Разослать", callback_data="gadmin:broadcast")],
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="gadmin:stats"), InlineKeyboardButton(text="🏆 Подвести итоги", callback_data="gadmin:draw")],
+    ])
+
+
+@router.message(Command("admin"))
+async def admin_menu_command(message: Message, bot: Bot) -> None:
+    if not message.from_user or not await is_moderation_admin(bot, message.from_user.id):
+        await message.answer("Команда доступна только администратору."); return
+    await message.answer("<b>Админ-меню</b>\nУправление оплатами и розыгрышами.", reply_markup=admin_menu_keyboard())
+
+
+@router.callback_query(F.data.startswith("gadmin:"))
+async def giveaway_admin_callback(callback: CallbackQuery, bot: Bot) -> None:
+    if not callback.from_user or not callback.message: return
+    if not await is_moderation_admin(bot, callback.from_user.id): await callback.answer("Нет доступа.", show_alert=True); return
+    action = callback.data.split(":", 1)[1]
+    active = db.active_giveaway()
+    if action == "create":
+        admin_sessions[callback.from_user.id] = "giveaway_title"; await callback.answer()
+        await callback.message.answer("Напиши название приза для нового розыгрыша."); return
+    if action == "price":
+        admin_sessions[callback.from_user.id] = "ticket_price"; await callback.answer()
+        await callback.message.answer(f"Текущая цена: <b>{ticket_price_rub()} ₽</b>\nПришли новую цену числом."); return
+    if not active:
+        await callback.answer("Сначала создай розыгрыш.", show_alert=True); return
+    giveaway_id = int(active['id'])
+    if action == "stats":
+        await callback.answer(); await callback.message.answer(giveaway_card(giveaway_id)); return
+    if action == "draw":
+        winner = db.draw_giveaway(giveaway_id); await callback.answer()
+        await callback.message.answer(f"🏆 Победитель: <code>{winner}</code>" if winner else "Нет оплаченных билетов или розыгрыш уже завершён."); return
+    if action == "publish":
+        channel = destination_chat_id()
+        if not channel: await callback.answer("Не настроен канал публикации.", show_alert=True); return
+        try:
+            await bot.send_message(channel, giveaway_card(giveaway_id), reply_markup=giveaway_keyboard(giveaway_id))
+        except TelegramAPIError: await callback.answer("Не удалось опубликовать. Проверь права бота.", show_alert=True); return
+        await callback.answer("Опубликовано."); return
+    if action == "broadcast":
+        sent = 0
+        for user_id in db.all_user_ids():
+            try:
+                await bot.send_message(user_id, giveaway_card(giveaway_id), reply_markup=giveaway_keyboard(giveaway_id)); sent += 1
+            except TelegramAPIError: pass
+        await callback.answer(); await callback.message.answer(f"Рассылка завершена: <b>{sent}</b> получателей.")
+
 
 
 @router.message(Command("invoice"))
