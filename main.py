@@ -1069,7 +1069,6 @@ async def configure_commands(bot: Bot) -> None:
         BotCommand(command="start", description="Отправить предложение"),
         BotCommand(command="deletepost", description="Удалить пост по ссылке"),
         BotCommand(command="who", description="Узнать автора по ссылке"),
-        BotCommand(command="authorprivacy", description="Настроить согласие на раскрытие авторства"),
         BotCommand(command="cancel", description="Отменить выбор действия"),
         BotCommand(command="help", description="Помощь"),
     ]
@@ -1725,9 +1724,7 @@ async def start(message: Message, bot: Bot) -> None:
         message,
         f"{ce('wave')} <b>Предложка</b>\n\n"
         "Отправь текст или медиа для публикации, либо выбери действие ниже.\n"
-        "«Удалить пост» и «Узнать, кто выложил» принимают ссылку на сообщение из канала.\n\n"
-        "Информация об авторе раскрывается только с его явного согласия. "
-        "Управление согласием: /authorprivacy.",
+        "«Удалить пост» и «Узнать, кто выложил» принимают ссылку на сообщение из канала.",
         reply_markup=POST_ACTION_KEYBOARD,
     )
 
@@ -1747,7 +1744,6 @@ async def help_command(message: Message, bot: Bot) -> None:
             "/start — отправить предложение\n"
             "/deletepost — удалить пост по ссылке после оплаты\n"
             "/who — узнать автора после оплаты, если он согласился\n"
-            "/authorprivacy — управлять раскрытием своего авторства\n"
             "/cancel — отменить ожидание ссылки\n"
             "/help — показать эту справку",
             reply_markup=POST_ACTION_KEYBOARD,
@@ -1779,12 +1775,8 @@ async def author_privacy_command(message: Message) -> None:
     db.register_user(user.id, user.username, user.full_name)
     state = "разрешено" if db.author_disclosure_enabled(user.id) else "запрещено"
     await message.answer(
-        "<b>Раскрытие авторства публикаций</b>\n\n"
-        "Согласие позволяет после оплаты сообщать другим пользователям ваше имя, "
-        "@username и Telegram ID по вашим будущим публикациям. "
-        "Без согласия эти сведения не продаются.\n\n"
-        f"Текущее состояние: <b>{state}</b>. "
-        "Отключение запрещает новые выдачи сведений, в том числе по старым публикациям.",
+        "Разрешить показ имени, @username и Telegram ID другим людям после оплаты?\n"
+        f"Сейчас: <b>{state}</b>.",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="Разрешаю раскрытие данных", callback_data="privacy:allow")],
             [InlineKeyboardButton(text="Запретить раскрытие данных", callback_data="privacy:deny")],
