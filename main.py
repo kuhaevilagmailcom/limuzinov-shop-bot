@@ -40,6 +40,12 @@ from dotenv import load_dotenv
 from storage import Storage, resolve_database_path
 from payments import RollyPayError, create_payment, get_payment
 from post_lookup import InvalidPostLink, parse_post_link
+from mtproto_removal import (
+    AdminDeletionUnavailable,
+    admin_deletion_configured,
+    delete_verified_target,
+    find_deletion_target,
+)
 
 ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
@@ -1404,6 +1410,75 @@ async def resolve_post_from_link(bot: Bot, raw: str):
     )
 
 
+async def start_untracked_removal_payment(message: Message, bot: Bot, raw_link: str) -> bool:
+    """Preflight old posts through an admin account, including those missing from SQLite."""
+    if not admin_deletion_configured():
+        await message.answer(
+            "Для удаления старых публикаций администратор пока не подключил "
+            "доступ Telegram MTProto. Оплата не создаётся."
+        )
+        return False
+    configured = destination_chat_id()
+    if isinstance(configured, int):
+        chat_id = configured
+    elif configured:
+        try:
+            chat_id = (await bot.get_chat(configured)).id
+        except TelegramAPIError:
+            await message.answer("Не удалось проверить канал для удаления.")
+            return False
+    else:
+        await message.answer("Канал публикаций не настроен.")
+        return False
+    _, message_id = parse_post_link(raw_link)
+    try:
+        target = await find_deletion_target(int(chat_id), message_id)
+    except AdminDeletionUnavailable as exc:
+        await message.answer(str(exc) + " Оплата не создаётся.")
+        return False
+    if not ROLLYPAY_API_KEY or not ROLLYPAY_TERMINAL_ID:
+        await message.answer("Оплата RollyPay пока не настроена.")
+        return False
+
+    amount = removal_price_rub()
+    order_id = f"oldpost-{message_id}-{uuid4().hex[:16]}"
+    try:
+        payment = await create_payment(
+            api_base=ROLLYPAY_API_BASE, api_key=ROLLYPAY_API_KEY,
+            terminal_id=ROLLYPAY_TERMINAL_ID, order_id=order_id,
+            amount=Decimal(amount),
+            description=f"Удаление публикации #{message_id}",
+            customer_id=str(message.from_user.id),
+            metadata={
+                "action": "legacy_post_removal",
+                "chat_id": str(target.chat_id),
+                "message_ids": list(target.message_ids),
+                "buyer_user_id": str(message.from_user.id),
+            },
+            test=ROLLYPAY_TEST_MODE,
+            success_url=f"https://t.me/{PUBLIC_BOT_USERNAME}",
+            fail_url=f"https://t.me/{PUBLIC_BOT_USERNAME}",
+        )
+        db.create_legacy_removal_payment(
+            str(payment["payment_id"]), order_id,
+            int(message.from_user.id), target.chat_id,
+            list(target.message_ids), amount,
+        )
+    except (RollyPayError, KeyError, ValueError) as exc:
+        logger.warning("Could not create old post removal invoice: %s", exc)
+        await message.answer("Не удалось создать счёт за удаление. Попробуй позже.")
+        return False
+    await message.answer(
+        f"<b>Удаление поста из канала</b>\\n\\n"
+        f"Стоимость: <b>{amount} ₽</b>. "
+        f"После оплаты удалим {len(target.message_ids)} сообщ. этой публикации.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text=f"Оплатить {amount} ₽", url=str(payment["pay_url"]))
+        ]]),
+    )
+    return True
+
+
 async def process_post_link(message: Message, bot: Bot, action: str) -> bool:
     if not message.text:
         await message.answer("Пришли текстовую ссылку на публикацию из канала.")
@@ -1413,15 +1488,18 @@ async def process_post_link(message: Message, bot: Bot, action: str) -> bool:
     except InvalidPostLink as exc:
         await message.answer(str(exc) + "\n\nНапример: <code>https://t.me/c/1234567890/123</code>")
         return False
+    if sub is None and action == "post_removal":
+        return await start_untracked_removal_payment(message, bot, message.text.strip())
     if sub is None:
         await message.answer(
-            "Не нашёл этот пост среди публикаций бота. Проверь ссылку. "
-            "Если пост старый, данные о нём могли не сохраниться после пересборки."
+            "Не нашёл автора этой публикации в сохранённых данных. "
+            "Сведения об авторе без согласия и достоверной записи не продаются."
         )
         return False
     return await start_post_action_payment(message, sub, action)
 
 async def delete_published_submission(bot: Bot, sub, message_ids: list[int]) -> bool:
+    """Use Bot API first; on old posts fall back to verified admin MTProto."""
     chat_id = parse_chat_id(sub["published_chat_id"])
     if chat_id is None or not message_ids:
         return False
@@ -1430,14 +1508,29 @@ async def delete_published_submission(bot: Bot, sub, message_ids: list[int]) -> 
             await bot.delete_message(chat_id=chat_id, message_id=message_id)
         except TelegramBadRequest as exc:
             text = str(exc).lower()
-            if "message to delete not found" not in text and "message identifier is not specified" not in text:
-                logger.warning("Could not delete paid post message %s: %s", message_id, exc)
-                return False
+            if "message to delete not found" in text or "message identifier is not specified" in text:
+                continue
+            logger.warning("Bot API could not delete message %s: %s", message_id, exc)
+            break
         except TelegramAPIError as exc:
-            logger.warning("Could not delete paid post message %s: %s", message_id, exc)
-            return False
-    return True
+            logger.warning("Bot API could not delete message %s: %s", message_id, exc)
+            break
+    else:
+        return True
 
+    if not admin_deletion_configured():
+        return False
+    try:
+        expected = destination_chat_id()
+        if not isinstance(expected, int):
+            expected = (await bot.get_chat(expected)).id
+        if int(chat_id) != int(expected):
+            logger.error("Refusing MTProto deletion outside configured channel")
+            return False
+        return await delete_verified_target(int(expected), tuple(message_ids))
+    except (TelegramAPIError, AdminDeletionUnavailable, TypeError, ValueError) as exc:
+        logger.warning("Could not delete older publication through channel admin: %s", exc)
+        return False
 
 async def deliver_author_info(bot: Bot, payment) -> None:
     """Send paid identity details only after consent and payment verification."""
