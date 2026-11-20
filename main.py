@@ -1491,16 +1491,19 @@ async def start(message: Message, bot: Bot) -> None:
     if await is_blocked_from_suggestions(bot, message.from_user.id):
         await safe_answer(
             message,
-            f"{ce('ban')} Доступ к отправке предложений заблокирован.",
-            reply_markup=ReplyKeyboardRemove(remove_keyboard=True),
+            f"{ce('ban')} Доступ к отправке предложений заблокирован. "
+            "Платные действия с опубликованными постами по-прежнему доступны.",
+            reply_markup=POST_ACTION_KEYBOARD,
         )
         return
     await safe_answer(
         message,
         f"{ce('wave')} <b>Предложка</b>\n\n"
-        "Отправь сюда текст, фото, видео, кружок, голосовое, GIF, стикер или файл. "
-        "Предложение появится в группе на проверке.",
-        reply_markup=ReplyKeyboardRemove(remove_keyboard=True),
+        "Отправь текст или медиа для публикации, либо выбери действие ниже.\n"
+        "«Удалить пост» и «Узнать, кто выложил» принимают ссылку на сообщение из канала.\n\n"
+        "Информация об авторе раскрывается только с его явного согласия. "
+        "Управление согласием: /authorprivacy.",
+        reply_markup=POST_ACTION_KEYBOARD,
     )
 
 
@@ -1516,8 +1519,13 @@ async def help_command(message: Message, bot: Bot) -> None:
         await safe_answer(
             message,
             "ℹ️ <b>Доступные команды</b>\n"
-            "/start — начать отправку предложений\n"
+            "/start — отправить предложение\n"
+            "/deletepost — удалить пост по ссылке после оплаты\n"
+            "/who — узнать автора после оплаты, если он согласился\n"
+            "/authorprivacy — управлять раскрытием своего авторства\n"
+            "/cancel — отменить ожидание ссылки\n"
             "/help — показать эту справку",
+            reply_markup=POST_ACTION_KEYBOARD,
         )
         return
     if message.chat.type not in {"group", "supergroup"} or message.chat.id != moderation_chat_id():
@@ -1531,9 +1539,79 @@ async def help_command(message: Message, bot: Bot) -> None:
         "и разослать его (после подтверждения)\n"
         "/unblock USER_ID — снять блокировку\n"
         "/setdeleteprice СУММА — изменить цену удаления поста в рублях\n"
+        "/setinfoprice СУММА — изменить цену сведений об авторе в рублях\n"
         "/cleanbuttons — убрать кнопки с сообщения, на которое ответили; "
         "/cleanbuttons POST_ID — убрать кнопки в канале\n"
         "/help — список команд",
+    )
+
+
+@router.message(Command("authorprivacy"), F.chat.type == "private")
+async def author_privacy_command(message: Message) -> None:
+    if not message.from_user:
+        return
+    user = message.from_user
+    db.register_user(user.id, user.username, user.full_name)
+    state = "разрешено" if db.author_disclosure_enabled(user.id) else "запрещено"
+    await message.answer(
+        "<b>Раскрытие авторства публикаций</b>\n\n"
+        "Согласие позволяет после оплаты сообщать другим пользователям ваше имя, "
+        "@username и Telegram ID по вашим будущим публикациям. "
+        "Без согласия эти сведения не продаются.\n\n"
+        f"Текущее состояние: <b>{state}</b>. "
+        "Отключение запрещает новые выдачи сведений, в том числе по старым публикациям.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Разрешаю раскрытие данных", callback_data="privacy:allow")],
+            [InlineKeyboardButton(text="Запретить раскрытие данных", callback_data="privacy:deny")],
+        ]),
+    )
+
+
+@router.callback_query(F.data.startswith("privacy:"))
+async def author_privacy_callback(callback: CallbackQuery) -> None:
+    if not callback.from_user or not callback.message:
+        await callback.answer("Действие недоступно.", show_alert=True)
+        return
+    if callback.message.chat.type != "private":
+        await callback.answer("Настройка доступна в личке.", show_alert=True)
+        return
+    choice = (callback.data or "").split(":")[-1]
+    if choice not in {"allow", "deny"}:
+        await callback.answer("Неизвестное действие.", show_alert=True)
+        return
+    user = callback.from_user
+    db.register_user(user.id, user.username, user.full_name)
+    db.set_author_disclosure(user.id, choice == "allow")
+    await callback.answer("Настройка сохранена.")
+    await callback.message.answer(
+        "Согласие на раскрытие авторства включено для будущих публикаций."
+        if choice == "allow" else
+        "Раскрытие авторства отключено; новые запросы на ваши данные не продаются.",
+        reply_markup=POST_ACTION_KEYBOARD,
+    )
+
+
+@router.message(Command("deletepost", "who"), F.chat.type == "private")
+async def post_action_command(message: Message) -> None:
+    if not message.from_user:
+        return
+    action = "author_lookup" if (message.text or "").split()[0].split("@")[0] == "/who" else "post_removal"
+    db.set_post_action(message.from_user.id, action)
+    title = "узнать, кто выложил" if action == "author_lookup" else "удалить"
+    await message.answer(
+        f"Чтобы {title} пост, пришли ссылку на него из канала.\n"
+        "Пример: <code>https://t.me/c/1234567890/123</code>",
+        reply_markup=POST_ACTION_KEYBOARD,
+    )
+
+
+@router.message(Command("cancel"), F.chat.type == "private")
+async def post_action_cancel(message: Message) -> None:
+    if message.from_user:
+        db.clear_post_action(message.from_user.id)
+    await message.answer(
+        "Ожидание ссылки отменено. Можешь отправить новый пост или выбрать кнопку.",
+        reply_markup=POST_ACTION_KEYBOARD,
     )
 
 
@@ -1687,6 +1765,26 @@ async def set_delete_price_command(message: Message, bot: Bot) -> None:
     await message.answer(f"{ce('check')} Цена удаления поста изменена: <b>{amount} ₽</b>.")
 
 
+@router.message(Command("setinfoprice"))
+async def set_info_price_command(message: Message, bot: Bot) -> None:
+    if not message.from_user or not await is_moderation_admin(bot, message.from_user.id):
+        await message.answer("Команда доступна только администраторам группы модерации.")
+        return
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) != 2 or not parts[1].strip().isdigit():
+        await message.answer(
+            f"Текущая цена сведений об авторе: <b>{author_info_price_rub()} ₽</b>\n"
+            "Чтобы изменить: <code>/setinfoprice 150</code>"
+        )
+        return
+    amount = int(parts[1].strip())
+    if amount < 1 or amount > 100000:
+        await message.answer("Цена должна быть от 1 до 100000 рублей.")
+        return
+    db.set_setting("post_author_info_price_rub", str(amount))
+    await message.answer(f"{ce('check')} Цена сведений об авторе: <b>{amount} ₽</b>.")
+
+
 @router.message(Command("unblock"), F.chat.type.in_({"group", "supergroup"}))
 async def unblock_command(message: Message) -> None:
     if message.chat.id != moderation_chat_id():
@@ -1746,11 +1844,41 @@ async def inbox(message: Message, bot: Bot) -> None:
             message.from_user.full_name,
         )
 
+    requested = (message.text or "").strip()
+    if requested in POST_ACTION_BUTTONS:
+        action = POST_ACTION_BUTTONS[requested]
+        db.set_post_action(sender_id, action)
+        text = (
+            "Пришли ссылку на пост из канала, который нужно удалить."
+            if action == "post_removal" else
+            "Пришли ссылку на пост из канала, автора которого хочешь узнать."
+        )
+        await message.answer(
+            text + "\nПример: <code>https://t.me/c/1234567890/123</code>",
+            reply_markup=POST_ACTION_KEYBOARD,
+        )
+        return
+
+    waiting = db.get_post_action(sender_id)
+    if waiting:
+        success = await process_post_link(message, bot, waiting)
+        if success:
+            db.clear_post_action(sender_id)
+        return
+
+    if requested.startswith(("https://t.me/", "https://telegram.me/")):
+        await message.answer(
+            "Сначала нажми «Удалить пост» или «Узнать, кто выложил», "
+            "а затем отправь ссылку.",
+            reply_markup=POST_ACTION_KEYBOARD,
+        )
+        return
+
     if await is_blocked_from_suggestions(bot, sender_id):
         await safe_answer(
             message,
             f"{ce('ban')} Доступ к отправке предложений заблокирован.",
-            reply_markup=ReplyKeyboardRemove(remove_keyboard=True),
+            reply_markup=POST_ACTION_KEYBOARD,
         )
         return
 
