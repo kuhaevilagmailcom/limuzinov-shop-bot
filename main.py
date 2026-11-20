@@ -1856,10 +1856,14 @@ async def inbox(message: Message, bot: Bot) -> None:
 
     waiting = db.get_post_action(sender_id)
     if waiting:
-        success = await process_post_link(message, bot, waiting)
-        if success:
-            db.clear_post_action(sender_id)
-        return
+        if requested.startswith(("https://t.me/", "https://telegram.me/")):
+            success = await process_post_link(message, bot, waiting)
+            if success:
+                db.clear_post_action(sender_id)
+            return
+        # A user may change their mind after selecting a paid action. Do not trap
+        # ordinary text or media in link-entry mode: send it to moderation normally.
+        db.clear_post_action(sender_id)
 
     if requested.startswith(("https://t.me/", "https://telegram.me/")):
         await message.answer(
