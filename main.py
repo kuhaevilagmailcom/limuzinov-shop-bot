@@ -1317,6 +1317,33 @@ async def start_post_action_payment(message: Message, sub, action: str) -> bool:
     if action not in {"post_removal", "author_lookup"}:
         await message.answer("Неизвестное действие. Выбери кнопку ещё раз.")
         return False
+
+    # A Bot API invoice cannot promise deletion once a post passes 48 hours.
+    # Check an authorized MTProto administrator before charging for old posts.
+    if action == "post_removal":
+        published_raw = str(sub["published_at"] or "").strip()
+        try:
+            published = datetime.fromisoformat(published_raw).replace(tzinfo=timezone.utc)
+            age_seconds = (datetime.now(timezone.utc) - published).total_seconds()
+        except (ValueError, TypeError):
+            age_seconds = 48 * 3600
+        if age_seconds >= 36 * 3600:
+            if not admin_deletion_configured():
+                await message.answer(
+                    "Для этой старой публикации нужно подключить администратора Telegram MTProto. "
+                    "Без него оплата недоступна: Bot API может отказать в удалении."
+                )
+                return False
+            chat_id = parse_chat_id(sub["published_chat_id"])
+            if not isinstance(chat_id, int):
+                await message.answer("Не удалось проверить канал для удаления старого поста.")
+                return False
+            try:
+                await find_deletion_target(chat_id, message_ids[0])
+            except AdminDeletionUnavailable as exc:
+                await message.answer(str(exc) + " Оплата не создаётся.")
+                return False
+
     if not ROLLYPAY_API_KEY or not ROLLYPAY_TERMINAL_ID:
         await message.answer("Оплата RollyPay пока не настроена. Обратись к администратору.")
         return False
