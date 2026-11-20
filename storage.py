@@ -431,6 +431,13 @@ class Storage:
                 "UPDATE bot_users SET author_disclosure_opt_in=? WHERE user_id=?",
                 (int(enabled), user_id),
             )
+            if not enabled:
+                # Revocation permanently disables disclosure of already published posts.
+                # Re-enabling only consents to posts submitted from that point onward.
+                self.conn.execute(
+                    "UPDATE submissions SET author_disclosure_consent=0 WHERE user_id=?",
+                    (user_id,),
+                )
 
     def set_post_action(self, user_id: int, action: str) -> None:
         if action not in {"post_removal", "author_lookup"}:
