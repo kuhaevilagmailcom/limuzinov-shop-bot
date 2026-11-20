@@ -146,6 +146,7 @@ class Storage:
             CREATE TABLE IF NOT EXISTS giveaway_tickets (
                 payment_id TEXT PRIMARY KEY, giveaway_id INTEGER NOT NULL REFERENCES giveaways(id),
                 user_id INTEGER NOT NULL, order_id TEXT NOT NULL UNIQUE, amount_rub INTEGER NOT NULL,
+                quantity INTEGER NOT NULL DEFAULT 1,
                 status TEXT NOT NULL DEFAULT 'created', created_at TEXT NOT NULL DEFAULT (datetime('now')), paid_at TEXT
             );
             CREATE INDEX IF NOT EXISTS giveaway_tickets_pending_idx ON giveaway_tickets(status, created_at);
@@ -188,6 +189,9 @@ class Storage:
         payment_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(removal_payments)")}
         if "action" not in payment_columns:
             self.conn.execute("ALTER TABLE removal_payments ADD COLUMN action TEXT NOT NULL DEFAULT 'post_removal'")
+        ticket_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(giveaway_tickets)")}
+        if "quantity" not in ticket_columns:
+            self.conn.execute("ALTER TABLE giveaway_tickets ADD COLUMN quantity INTEGER NOT NULL DEFAULT 1")
 
         item_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(items)")}
         if "moderation_message_id" not in item_columns:
@@ -832,9 +836,9 @@ class Storage:
     def giveaway(self, giveaway_id: int) -> sqlite3.Row | None:
         return self.conn.execute("SELECT * FROM giveaways WHERE id=?", (giveaway_id,)).fetchone()
 
-    def create_giveaway_ticket(self, payment_id: str, order_id: str, giveaway_id: int, user_id: int, amount: int) -> None:
+    def create_giveaway_ticket(self, payment_id: str, order_id: str, giveaway_id: int, user_id: int, amount: int, quantity: int = 1) -> None:
         with self.conn:
-            self.conn.execute("INSERT INTO giveaway_tickets(payment_id,giveaway_id,user_id,order_id,amount_rub) VALUES(?,?,?,?,?)", (payment_id, giveaway_id, user_id, order_id, amount))
+            self.conn.execute("INSERT INTO giveaway_tickets(payment_id,giveaway_id,user_id,order_id,amount_rub,quantity) VALUES(?,?,?,?,?,?)", (payment_id, giveaway_id, user_id, order_id, amount, quantity))
 
     def pending_giveaway_tickets(self) -> list[sqlite3.Row]:
         return list(self.conn.execute("SELECT t.*, g.title, g.status AS giveaway_status FROM giveaway_tickets t JOIN giveaways g ON g.id=t.giveaway_id WHERE t.status='created' ORDER BY t.created_at LIMIT 50"))
@@ -844,14 +848,23 @@ class Storage:
             self.conn.execute("UPDATE giveaway_tickets SET status=?, paid_at=CASE WHEN ?='paid' THEN datetime('now') ELSE paid_at END WHERE payment_id=? AND status!='paid'", (status, status, payment_id))
 
     def giveaway_stats(self, giveaway_id: int) -> sqlite3.Row | None:
-        return self.conn.execute("SELECT g.*, COUNT(CASE WHEN t.status='paid' THEN 1 END) tickets, COUNT(DISTINCT CASE WHEN t.status='paid' THEN t.user_id END) buyers, COALESCE(SUM(CASE WHEN t.status='paid' THEN t.amount_rub END),0) revenue FROM giveaways g LEFT JOIN giveaway_tickets t ON t.giveaway_id=g.id WHERE g.id=? GROUP BY g.id", (giveaway_id,)).fetchone()
+        return self.conn.execute("SELECT g.*, COALESCE(SUM(CASE WHEN t.status='paid' THEN t.quantity END),0) tickets, COUNT(DISTINCT CASE WHEN t.status='paid' THEN t.user_id END) buyers, COALESCE(SUM(CASE WHEN t.status='paid' THEN t.amount_rub END),0) revenue FROM giveaways g LEFT JOIN giveaway_tickets t ON t.giveaway_id=g.id WHERE g.id=? GROUP BY g.id", (giveaway_id,)).fetchone()
 
     def draw_giveaway(self, giveaway_id: int) -> int | None:
-        row = self.conn.execute("SELECT user_id FROM giveaway_tickets WHERE giveaway_id=? AND status='paid' ORDER BY RANDOM() LIMIT 1", (giveaway_id,)).fetchone()
-        if not row: return None
+        tickets = list(self.conn.execute("SELECT user_id, quantity FROM giveaway_tickets WHERE giveaway_id=? AND status='paid' ORDER BY payment_id", (giveaway_id,)))
+        total = sum(int(row["quantity"]) for row in tickets)
+        if not total: return None
+        selected = secrets.randbelow(total)
+        owner = None
+        for ticket in tickets:
+            selected -= int(ticket["quantity"])
+            if selected < 0:
+                owner = int(ticket["user_id"])
+                break
+        if owner is None: return None
         with self.conn:
-            self.conn.execute("UPDATE giveaways SET status='drawn', winner_user_id=?, drawn_at=datetime('now') WHERE id=? AND status='active'", (int(row['user_id']), giveaway_id))
-        return int(row['user_id'])
+            changed = self.conn.execute("UPDATE giveaways SET status='drawn', winner_user_id=?, drawn_at=datetime('now') WHERE id=? AND status='active'", (owner, giveaway_id)).rowcount
+        return owner if changed else None
 
     def close(self) -> None:
         self.conn.close()

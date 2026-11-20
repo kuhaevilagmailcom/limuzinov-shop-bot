@@ -1638,8 +1638,8 @@ def ticket_price_rub() -> int:
 
 def giveaway_keyboard(giveaway_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Купить билет", callback_data=f"giveaway:buy:{giveaway_id}")],
-        [InlineKeyboardButton(text="Статистика", callback_data=f"giveaway:stats:{giveaway_id}")],
+        [InlineKeyboardButton(text="Купить 1 билет", callback_data=f"giveaway:buy:{giveaway_id}:1"), InlineKeyboardButton(text="5 билетов", callback_data=f"giveaway:buy:{giveaway_id}:5")],
+        [InlineKeyboardButton(text="Мои билеты", callback_data=f"giveaway:mine:{giveaway_id}"), InlineKeyboardButton(text="Статистика", callback_data=f"giveaway:stats:{giveaway_id}")],
     ])
 
 
@@ -1647,18 +1647,17 @@ def giveaway_keyboard(giveaway_id: int) -> InlineKeyboardMarkup:
 async def invoice_command(message: Message, bot: Bot) -> None:
     if not message.from_user or not await is_moderation_admin(bot, message.from_user.id):
         await message.answer("Команда доступна только администраторам группы модерации."); return
-    parts = (message.text or "").split(maxsplit=3)
-    if len(parts) < 4 or not parts[1].lstrip('-').isdigit() or not parts[2].isdigit() or not 1 <= int(parts[2]) <= 100000:
-        await message.answer("Пример: <code>/invoice 123456789 500 Оплата услуги</code>"); return
-    buyer_id, amount, description = int(parts[1]), int(parts[2]), parts[3]
+    parts = (message.text or "").split(maxsplit=2)
+    if len(parts) < 3 or not parts[1].isdigit() or not 1 <= int(parts[1]) <= 100000:
+        await message.answer("Пример: <code>/invoice 500 Оплата услуги</code>"); return
+    buyer_id, amount, description = message.from_user.id, int(parts[1]), parts[2]
     if not ROLLYPAY_API_KEY or not ROLLYPAY_TERMINAL_ID: await message.answer("Оплата RollyPay пока не настроена."); return
     order_id = f"invoice-{uuid4().hex[:18]}"
     try:
         payment = await create_payment(api_base=ROLLYPAY_API_BASE, api_key=ROLLYPAY_API_KEY, terminal_id=ROLLYPAY_TERMINAL_ID, order_id=order_id, amount=Decimal(amount), description=description, customer_id=str(buyer_id), metadata={"action":"invoice","buyer_user_id":str(buyer_id),"created_by":str(message.from_user.id)}, test=ROLLYPAY_TEST_MODE, success_url=f"https://t.me/{PUBLIC_BOT_USERNAME}", fail_url=f"https://t.me/{PUBLIC_BOT_USERNAME}")
         db.create_invoice(str(payment['payment_id']), order_id, buyer_id, message.from_user.id, amount, description)
-        await bot.send_message(buyer_id, f"<b>Счёт на оплату</b>\n{html.escape(description)}\nСумма: <b>{amount} ₽</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Оплатить", url=str(payment['pay_url']))]]))
-    except (RollyPayError, KeyError, ValueError, TelegramAPIError): await message.answer("Не удалось создать или отправить счёт."); return
-    await message.answer(f"Счёт на <b>{amount} ₽</b> отправлен пользователю <code>{buyer_id}</code>.")
+    except (RollyPayError, KeyError, ValueError): await message.answer("Не удалось создать счёт."); return
+    await message.answer(f"<b>Счёт на оплату</b>\n{html.escape(description)}\nСумма: <b>{amount} ₽</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Открыть оплату", url=str(payment['pay_url']))]]))
 
 
 @router.message(Command("setticketprice"))
@@ -1687,7 +1686,7 @@ async def giveaway_command(message: Message, bot: Bot) -> None:
 @router.callback_query(F.data.startswith("giveaway:"))
 async def giveaway_callback(callback: CallbackQuery, bot: Bot) -> None:
     if not callback.from_user or not callback.data: return
-    _, action, raw_id = callback.data.split(":")
+    parts = callback.data.split(":"); _, action, raw_id = parts[:3]
     if not raw_id.isdigit(): return
     giveaway = db.giveaway(int(raw_id))
     if not giveaway: await callback.answer("Розыгрыш не найден.", show_alert=True); return
@@ -1695,14 +1694,19 @@ async def giveaway_callback(callback: CallbackQuery, bot: Bot) -> None:
         if not await is_moderation_admin(bot, callback.from_user.id): await callback.answer("Статистика только для админов.", show_alert=True); return
         stats = db.giveaway_stats(int(raw_id)); await callback.answer()
         await callback.message.answer(f"<b>Статистика розыгрыша #{raw_id}</b>\nБилетов: <b>{stats['tickets']}</b>\nУчастников: <b>{stats['buyers']}</b>\nСобрано: <b>{stats['revenue']} ₽</b>"); return
+    if action == "mine":
+        row = db.conn.execute("SELECT COALESCE(SUM(quantity),0) tickets FROM giveaway_tickets WHERE giveaway_id=? AND user_id=? AND status='paid'", (int(raw_id), callback.from_user.id)).fetchone()
+        await callback.answer(f"Ваших подтверждённых билетов: {row['tickets']}", show_alert=True); return
     if action != "buy" or giveaway['status'] != 'active': await callback.answer("Розыгрыш завершён.", show_alert=True); return
+    quantity = int(parts[3]) if len(parts) == 4 and parts[3].isdigit() and 1 <= int(parts[3]) <= 99 else 1
     if not ROLLYPAY_API_KEY or not ROLLYPAY_TERMINAL_ID: await callback.answer("Оплата пока не настроена.", show_alert=True); return
     order_id = f"ticket-{raw_id}-{uuid4().hex[:16]}"
     try:
-        payment = await create_payment(api_base=ROLLYPAY_API_BASE, api_key=ROLLYPAY_API_KEY, terminal_id=ROLLYPAY_TERMINAL_ID, order_id=order_id, amount=Decimal(int(giveaway['ticket_price_rub'])), description=f"Билет в розыгрыш #{raw_id}", customer_id=str(callback.from_user.id), metadata={"action":"giveaway_ticket","giveaway_id":raw_id,"buyer_user_id":str(callback.from_user.id)}, test=ROLLYPAY_TEST_MODE, success_url=f"https://t.me/{PUBLIC_BOT_USERNAME}", fail_url=f"https://t.me/{PUBLIC_BOT_USERNAME}")
-        db.create_giveaway_ticket(str(payment['payment_id']), order_id, int(raw_id), callback.from_user.id, int(giveaway['ticket_price_rub']))
+        amount = int(giveaway['ticket_price_rub']) * quantity
+        payment = await create_payment(api_base=ROLLYPAY_API_BASE, api_key=ROLLYPAY_API_KEY, terminal_id=ROLLYPAY_TERMINAL_ID, order_id=order_id, amount=Decimal(amount), description=f"{quantity} билет(ов) в розыгрыш #{raw_id}", customer_id=str(callback.from_user.id), metadata={"action":"giveaway_ticket","giveaway_id":raw_id,"buyer_user_id":str(callback.from_user.id),"quantity":str(quantity)}, test=ROLLYPAY_TEST_MODE, success_url=f"https://t.me/{PUBLIC_BOT_USERNAME}", fail_url=f"https://t.me/{PUBLIC_BOT_USERNAME}")
+        db.create_giveaway_ticket(str(payment['payment_id']), order_id, int(raw_id), callback.from_user.id, amount, quantity)
     except (RollyPayError, KeyError, ValueError): await callback.answer("Не удалось создать оплату.", show_alert=True); return
-    await callback.answer(); await callback.message.answer(f"Билет: <b>{giveaway['ticket_price_rub']} ₽</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Оплатить билет", url=str(payment['pay_url']))]]))
+    await callback.answer(); await callback.message.answer(f"Билеты: <b>{quantity}</b> · к оплате: <b>{amount} ₽</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Оплатить билеты", url=str(payment['pay_url']))]]))
 
 
 @router.message(Command("drawgiveaway"))
