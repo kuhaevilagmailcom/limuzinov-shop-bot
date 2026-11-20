@@ -39,6 +39,14 @@ def fake_submission(consent=0):
 
 
 class PaidPostBotTests(unittest.IsolatedAsyncioTestCase):
+    async def test_delete_button_starts_link_session(self):
+        msg = fake_message("Удалить пост")
+        with patch.object(app.db, "register_user"):
+            with patch.object(app.db, "set_post_action") as selected:
+                await app.inbox(msg, AsyncMock())
+        selected.assert_called_once_with(111, "post_removal")
+        self.assertIn("https://t.me/c/", msg.answer.await_args.args[0])
+
     async def test_lookup_button_starts_link_session(self):
         msg = fake_message("Узнать, кто выложил")
         with patch.object(app.db, "register_user"):

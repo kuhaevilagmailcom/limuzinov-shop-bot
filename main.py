@@ -58,9 +58,10 @@ PUBLIC_BOT_USERNAME = os.getenv("PUBLIC_BOT_USERNAME", "PozorMgnBot").strip().ls
 DEFAULT_REMOVAL_PRICE_RUB = 100
 DEFAULT_AUTHOR_INFO_PRICE_RUB = 100
 
-POST_ACTION_BUTTONS = {"Узнать, кто выложил": "author_lookup"}
+POST_ACTION_BUTTONS = {"Удалить пост": "post_removal", "Узнать, кто выложил": "author_lookup"}
 POST_ACTION_KEYBOARD = ReplyKeyboardMarkup(
     keyboard=[
+        [KeyboardButton(text="Удалить пост")],
         [KeyboardButton(text="Узнать, кто выложил")],
     ],
     resize_keyboard=True,
@@ -1060,6 +1061,7 @@ async def configure_commands(bot: Bot) -> None:
 
     start_command = [
         BotCommand(command="start", description="Отправить предложение"),
+        BotCommand(command="deletepost", description="Удалить пост по ссылке"),
         BotCommand(command="who", description="Узнать автора по ссылке"),
         BotCommand(command="cancel", description="Отменить выбор действия"),
         BotCommand(command="help", description="Помощь"),
@@ -1076,6 +1078,7 @@ async def configure_commands(bot: Bot) -> None:
                     BotCommand(command="done", description="Рассылка пользователям"),
                     BotCommand(command="users", description="Список пользователей"),
                     BotCommand(command="unblock", description="Разблокировать пользователя"),
+                    BotCommand(command="setdeleteprice", description="Цена удаления поста"),
                     BotCommand(command="setinfoprice", description="Цена сведений об авторе"),
                     BotCommand(command="cleanbuttons", description="Убрать старые кнопки с сообщения"),
                 ],
@@ -1291,17 +1294,17 @@ async def start_post_action_payment(message: Message, sub, action: str) -> bool:
             "Этот пост пока не готов к оплате: нет данных публикации. Обратись к администратору."
         )
         return False
-    if action != "author_lookup":
+    if action not in {"post_removal", "author_lookup"}:
         await message.answer("Неизвестное действие. Выбери кнопку ещё раз.")
         return False
     if not ROLLYPAY_API_KEY or not ROLLYPAY_TERMINAL_ID:
         await message.answer("Оплата RollyPay пока не настроена. Обратись к администратору.")
         return False
 
-    amount = author_info_price_rub()
-    prefix = "postinfo"
+    amount = removal_price_rub() if action == "post_removal" else author_info_price_rub()
+    prefix = "postrm" if action == "post_removal" else "postinfo"
     order_id = f"{prefix}-{int(sub['id'])}-{uuid4().hex[:16]}"
-    title = "Автор публикации"
+    title = "Удаление поста" if action == "post_removal" else "Автор публикации"
     metadata = {
         "action": action,
         "submission_id": str(sub["id"]),
@@ -1329,10 +1332,15 @@ async def start_post_action_payment(message: Message, sub, action: str) -> bool:
         await message.answer("Не удалось создать оплату. Попробуй ещё раз.")
         return False
 
-    await message.answer(
+    text = (
         "Публикация найдена.\n"
         f"Стоимость получения информации: <b>{amount} ₽</b>\n"
-        "Оплата через RollyPay",
+        "Оплата через RollyPay"
+        if action == "author_lookup" else
+        f"<b>Удаление поста #{int(sub['id'])}</b>\n\nСтоимость: <b>{amount} ₽</b>"
+    )
+    await message.answer(
+        text,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text=f"Оплатить {amount} ₽", url=str(payment["pay_url"]))
         ]]),
@@ -1544,6 +1552,7 @@ async def help_command(message: Message, bot: Bot) -> None:
             message,
             "ℹ️ <b>Доступные команды</b>\n"
             "/start — отправить предложение\n"
+            "/deletepost — удалить пост по ссылке после оплаты\n"
             "/who — узнать автора публикации после оплаты\n"
             "/cancel — отменить ожидание ссылки\n"
             "/help — показать эту справку",
@@ -1560,6 +1569,7 @@ async def help_command(message: Message, bot: Bot) -> None:
         "/done ТЕКСТ — рассылка всем пользователям; также можно ответить командой /done на сообщение "
         "и разослать его (после подтверждения)\n"
         "/unblock USER_ID — снять блокировку\n"
+        "/setdeleteprice СУММА — изменить цену удаления поста в рублях\n"
         "/setinfoprice СУММА — изменить цену сведений об авторе в рублях\n"
         "/cleanbuttons — убрать кнопки с сообщения, на которое ответили; "
         "/cleanbuttons POST_ID — убрать кнопки в канале\n"
@@ -1567,12 +1577,19 @@ async def help_command(message: Message, bot: Bot) -> None:
     )
 
 
-@router.message(Command("who"), F.chat.type == "private")
+@router.message(Command("deletepost", "who"), F.chat.type == "private")
 async def post_action_command(message: Message) -> None:
     if not message.from_user:
         return
-    action = "author_lookup"
+    action = "author_lookup" if (message.text or "").split()[0].split("@")[0] == "/who" else "post_removal"
     db.set_post_action(message.from_user.id, action)
+    if action == "post_removal":
+        await message.answer(
+            "Пришлите ссылку на публикацию из канала для удаления.\n"
+            "Пример: <code>https://t.me/c/1234567890/456</code>",
+            reply_markup=POST_ACTION_KEYBOARD,
+        )
+        return
     await message.answer(
         "Пришлите ссылку на публикацию из канала.\n"
         "Пример: <code>https://t.me/c/1234567890/456</code>",
@@ -1823,6 +1840,13 @@ async def inbox(message: Message, bot: Bot) -> None:
     if requested in POST_ACTION_BUTTONS:
         action = POST_ACTION_BUTTONS[requested]
         db.set_post_action(sender_id, action)
+        if action == "post_removal":
+            await message.answer(
+                "Пришлите ссылку на публикацию из канала для удаления.\n"
+                "Пример: <code>https://t.me/c/1234567890/456</code>",
+                reply_markup=POST_ACTION_KEYBOARD,
+            )
+            return
         await message.answer(
             "Пришлите ссылку на публикацию из канала.\n"
             "Пример: <code>https://t.me/c/1234567890/456</code>",
@@ -1839,7 +1863,7 @@ async def inbox(message: Message, bot: Bot) -> None:
 
     if requested.startswith(("https://t.me/", "https://telegram.me/")):
         await message.answer(
-            "Нажмите «Узнать, кто выложил», затем отправьте ссылку.",
+            "Нажмите «Удалить пост» или «Узнать, кто выложил», затем отправьте ссылку.",
             reply_markup=POST_ACTION_KEYBOARD,
         )
         return
