@@ -27,6 +27,8 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
     MenuButtonCommands,
     Message,
     MessageEntity,
@@ -37,6 +39,7 @@ from dotenv import load_dotenv
 
 from storage import Storage, resolve_database_path
 from payments import RollyPayError, create_payment, get_payment
+from post_lookup import InvalidPostLink, parse_post_link
 
 ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
@@ -53,6 +56,17 @@ ROLLYPAY_TEST_MODE = os.getenv("ROLLYPAY_TEST_MODE", "false").strip().lower() in
 PUBLIC_SITE_BASE_URL = os.getenv("PUBLIC_SITE_BASE_URL", "https://mgnvpn.ru").rstrip("/")
 PUBLIC_BOT_USERNAME = os.getenv("PUBLIC_BOT_USERNAME", "PozorMgnBot").strip().lstrip("@")
 DEFAULT_REMOVAL_PRICE_RUB = 100
+DEFAULT_AUTHOR_INFO_PRICE_RUB = 100
+
+POST_ACTION_BUTTONS = {"Удалить пост": "post_removal", "Узнать, кто выложил": "author_lookup"}
+POST_ACTION_KEYBOARD = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="Удалить пост")],
+        [KeyboardButton(text="Узнать, кто выложил")],
+    ],
+    resize_keyboard=True,
+    is_persistent=True,
+)
 
 # Known moderation group ID from the existing deployment. Publication must be configured separately.
 REQUESTED_DEFAULT_CHAT_ID = "-5106639548"
@@ -738,14 +752,14 @@ async def safe_notify(bot: Bot, chat_id: int, text: str) -> None:
             bot,
             chat_id,
             text,
-            reply_markup=ReplyKeyboardRemove(remove_keyboard=True),
+            reply_markup=POST_ACTION_KEYBOARD,
         )
     except TelegramBadRequest:
         try:
             await bot.send_message(
                 chat_id,
                 html.escape(strip_custom_emoji_markup(text)),
-                reply_markup=ReplyKeyboardRemove(remove_keyboard=True),
+                reply_markup=POST_ACTION_KEYBOARD,
             )
         except TelegramAPIError as exc:
             logger.info("Cannot notify user %s: %s", chat_id, exc)
@@ -1047,6 +1061,10 @@ async def configure_commands(bot: Bot) -> None:
 
     start_command = [
         BotCommand(command="start", description="Отправить предложение"),
+        BotCommand(command="deletepost", description="Удалить пост по ссылке"),
+        BotCommand(command="who", description="Узнать автора по ссылке"),
+        BotCommand(command="authorprivacy", description="Настроить согласие на раскрытие авторства"),
+        BotCommand(command="cancel", description="Отменить выбор действия"),
         BotCommand(command="help", description="Помощь"),
     ]
     await bot.set_my_commands(start_command, scope=BotCommandScopeDefault())
@@ -1062,6 +1080,7 @@ async def configure_commands(bot: Bot) -> None:
                     BotCommand(command="users", description="Список пользователей"),
                     BotCommand(command="unblock", description="Разблокировать пользователя"),
                     BotCommand(command="setdeleteprice", description="Цена удаления поста"),
+                    BotCommand(command="setinfoprice", description="Цена сведений об авторе"),
                     BotCommand(command="cleanbuttons", description="Убрать старые кнопки с сообщения"),
                 ],
                 scope=BotCommandScopeChat(chat_id=moderation_id),
@@ -1250,30 +1269,59 @@ def published_message_ids(sub) -> list[int]:
         return []
 
 
-async def start_removal_payment(message: Message, submission_id: int, token: str) -> None:
-    sub = db.removal_target(submission_id, token)
+def author_info_price_rub() -> int:
+    raw = db.get_setting("post_author_info_price_rub") or os.getenv(
+        "POST_AUTHOR_INFO_PRICE_RUB", str(DEFAULT_AUTHOR_INFO_PRICE_RUB)
+    )
+    try:
+        return max(1, min(100000, int(raw)))
+    except (TypeError, ValueError):
+        return DEFAULT_AUTHOR_INFO_PRICE_RUB
+
+
+def may_disclose_author(sub) -> bool:
+    return bool(
+        sub["author_disclosure_consent"]
+        and db.author_disclosure_enabled(int(sub["user_id"]))
+    )
+
+
+async def start_post_action_payment(message: Message, sub, action: str) -> bool:
+    """Create a fresh invoice only for a verified tracked post and permitted action."""
     if not sub:
-        await message.answer(\n            "Не удалось найти данные этой публикации. Пост мог остаться в канале после "
-            "перезапуска со старой базой. Обратись к администратору, чтобы восстановить "
-            "ссылку — оплату за неизвестный пост не создаём."
+        await message.answer(
+            "Не нашёл эту публикацию в базе. Ссылки из других каналов не принимаются."
         )
-        return
+        return False
     if sub["removed_at"]:
-        await message.answer("Пост уже удалён после подтверждённой оплаты.")
-        return
+        await message.answer("Этот пост уже удалён.")
+        return False
     message_ids = published_message_ids(sub)
     if not sub["published_chat_id"] or not message_ids:
-        await message.answer("Не удалось найти опубликованный пост. Напиши администратору.")
-        return
-    if not ROLLYPAY_API_KEY:
-        await message.answer("Оплата удаления пока не настроена. Администратору нужно добавить ключ RollyPay.")
-        return
+        await message.answer(
+            "Этот пост пока не готов к оплате: нет данных публикации. Обратись к администратору."
+        )
+        return False
+    if action == "author_lookup" and not may_disclose_author(sub):
+        await message.answer(
+            "Для этой публикации автор не разрешил раскрывать свои данные. "
+            "Оплату не создаём."
+        )
+        return False
+    if action not in {"post_removal", "author_lookup"}:
+        await message.answer("Неизвестное действие. Выбери кнопку ещё раз.")
+        return False
+    if not ROLLYPAY_API_KEY or not ROLLYPAY_TERMINAL_ID:
+        await message.answer("Оплата RollyPay пока не настроена. Обратись к администратору.")
+        return False
 
-    amount = removal_price_rub()
-    order_id = f"postrm-{submission_id}-{uuid4().hex[:16]}"
+    amount = removal_price_rub() if action == "post_removal" else author_info_price_rub()
+    prefix = "postrm" if action == "post_removal" else "postinfo"
+    order_id = f"{prefix}-{int(sub['id'])}-{uuid4().hex[:16]}"
+    title = "Удаление поста" if action == "post_removal" else "Информация об авторе"
     metadata = {
-        "action": "post_removal",
-        "submission_id": str(submission_id),
+        "action": action,
+        "submission_id": str(sub["id"]),
         "chat_id": str(sub["published_chat_id"]),
         "message_ids": message_ids,
         "buyer_user_id": str(message.from_user.id),
@@ -1282,29 +1330,96 @@ async def start_removal_payment(message: Message, submission_id: int, token: str
         payment = await create_payment(
             api_base=ROLLYPAY_API_BASE, api_key=ROLLYPAY_API_KEY,
             terminal_id=ROLLYPAY_TERMINAL_ID, order_id=order_id,
-            amount=Decimal(amount), description=f"Удаление поста #{submission_id}",
+            amount=Decimal(amount), description=f"{title} #{int(sub['id'])}",
             customer_id=str(message.from_user.id), metadata=metadata,
             test=ROLLYPAY_TEST_MODE,
-            success_url=f"{PUBLIC_SITE_BASE_URL}/payments/post-removal/success",
-            fail_url=f"{PUBLIC_SITE_BASE_URL}/payments/post-removal/fail",
+            # Payment fulfillment is polled by the bot independently of the VPN site.
+            success_url=f"https://t.me/{PUBLIC_BOT_USERNAME}",
+            fail_url=f"https://t.me/{PUBLIC_BOT_USERNAME}",
         )
         db.create_removal_payment(
-            str(payment["payment_id"]), order_id, submission_id,
-            message.from_user.id, amount,
+            str(payment["payment_id"]), order_id, int(sub["id"]),
+            message.from_user.id, amount, action=action,
         )
     except (RollyPayError, KeyError, ValueError) as exc:
-        logger.warning("Could not create post removal payment: %s", exc)
-        await message.answer("Не удалось создать оплату. Попробуй ещё раз через минуту.")
-        return
+        logger.warning("Could not create paid post action: %s", exc)
+        await message.answer("Не удалось создать оплату. Попробуй ещё раз.")
+        return False
 
+    explanation = (
+        "После подтверждения оплаты пост и все части альбома будут удалены."
+        if action == "post_removal"
+        else "После подтверждения оплаты бот пришлёт ник, @username и Telegram ID автора."
+    )
     await message.answer(
-        f"<b>Удаление поста #{submission_id}</b>\n\n"
-        f"Стоимость: <b>{amount} ₽</b>. После подтверждения оплаты пост удалится автоматически.",
+        f"<b>{title} #{int(sub['id'])}</b>\n\n"
+        f"Стоимость: <b>{amount} ₽</b>. {explanation}",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text=f"Оплатить {amount} ₽", url=str(payment["pay_url"]))
         ]]),
     )
+    return True
 
+
+async def start_removal_payment(message: Message, submission_id: int, token: str) -> None:
+    """Preserve previously published per-post deep links."""
+    sub = db.removal_target(submission_id, token)
+    if not sub:
+        await message.answer(
+            "Нет записи для этой старой ссылки. Воспользуйся кнопкой «Удалить пост» "
+            "и пришли ссылку на сообщение из канала."
+        )
+        return
+    await start_post_action_payment(message, sub, "post_removal")
+
+
+async def resolve_post_from_link(bot: Bot, raw: str):
+    channel, message_id = parse_post_link(raw)
+    configured = destination_chat_id()
+    if configured is None:
+        raise InvalidPostLink("Администратор ещё не настроил канал для публикаций.")
+    if isinstance(configured, int):
+        expected_chat_id = configured
+    else:
+        try:
+            expected_chat_id = (await bot.get_chat(configured)).id
+        except TelegramAPIError as exc:
+            logger.warning("Could not resolve configured publication chat: %s", exc)
+            raise InvalidPostLink("Не удалось проверить канал публикаций.") from exc
+
+    if channel.startswith("@"):
+        try:
+            actual_chat_id = (await bot.get_chat(channel)).id
+        except TelegramAPIError as exc:
+            raise InvalidPostLink("Этот публичный канал не удалось проверить.") from exc
+    else:
+        actual_chat_id = int(channel)
+    if int(actual_chat_id) != int(expected_chat_id):
+        raise InvalidPostLink("Пришли ссылку на пост именно из нашего канала.")
+
+    original_config = destination_chat_value()
+    stored_alias = str(original_config) if original_config is not None else ""
+    return db.find_published_submission(
+        int(expected_chat_id), message_id, channel_alias=stored_alias
+    )
+
+
+async def process_post_link(message: Message, bot: Bot, action: str) -> bool:
+    if not message.text:
+        await message.answer("Пришли текстовую ссылку на публикацию из канала.")
+        return False
+    try:
+        sub = await resolve_post_from_link(bot, message.text.strip())
+    except InvalidPostLink as exc:
+        await message.answer(str(exc) + "\n\nНапример: <code>https://t.me/c/1234567890/123</code>")
+        return False
+    if sub is None:
+        await message.answer(
+            "Не нашёл этот пост среди публикаций бота. Проверь ссылку. "
+            "Если пост старый, данные о нём могли не сохраниться после пересборки."
+        )
+        return False
+    return await start_post_action_payment(message, sub, action)
 
 async def delete_published_submission(bot: Bot, sub, message_ids: list[int]) -> bool:
     chat_id = parse_chat_id(sub["published_chat_id"])
