@@ -65,6 +65,7 @@ class Storage:
                 published_chat_id TEXT,
                 published_message_ids TEXT NOT NULL DEFAULT '[]',
                 removed_at TEXT,
+                author_disclosure_consent INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 UNIQUE(user_id, album_key)
             );
@@ -94,7 +95,8 @@ class Storage:
                 username TEXT,
                 full_name TEXT NOT NULL,
                 first_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
-                last_seen_at TEXT NOT NULL DEFAULT (datetime('now'))
+                last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+                author_disclosure_opt_in INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS bot_users_seen_idx
                 ON bot_users(first_seen_at DESC, user_id DESC);
@@ -116,12 +118,18 @@ class Storage:
                 submission_id INTEGER NOT NULL REFERENCES submissions(id),
                 buyer_user_id INTEGER NOT NULL,
                 amount_rub INTEGER NOT NULL,
+                action TEXT NOT NULL DEFAULT 'post_removal',
                 status TEXT NOT NULL DEFAULT 'created',
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 paid_at TEXT
             );
             CREATE INDEX IF NOT EXISTS removal_payments_pending_idx
                 ON removal_payments(status, created_at);
+            CREATE TABLE IF NOT EXISTS post_action_sessions (
+                user_id INTEGER PRIMARY KEY,
+                action TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
         """)
 
         # Add fields when opening databases made by the earlier direct-publication version.
@@ -152,6 +160,15 @@ class Storage:
             self.conn.execute("ALTER TABLE submissions ADD COLUMN published_message_ids TEXT NOT NULL DEFAULT '[]'")
         if "removed_at" not in columns:
             self.conn.execute("ALTER TABLE submissions ADD COLUMN removed_at TEXT")
+        if "author_disclosure_consent" not in columns:
+            self.conn.execute("ALTER TABLE submissions ADD COLUMN author_disclosure_consent INTEGER NOT NULL DEFAULT 0")
+
+        user_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(bot_users)")}
+        if "author_disclosure_opt_in" not in user_columns:
+            self.conn.execute("ALTER TABLE bot_users ADD COLUMN author_disclosure_opt_in INTEGER NOT NULL DEFAULT 0")
+        payment_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(removal_payments)")}
+        if "action" not in payment_columns:
+            self.conn.execute("ALTER TABLE removal_payments ADD COLUMN action TEXT NOT NULL DEFAULT 'post_removal'")
 
         item_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(items)")}
         if "moderation_message_id" not in item_columns:
@@ -216,16 +233,16 @@ class Storage:
                     submission_id, fresh = int(existing["id"]), False
                 else:
                     cur = self.conn.execute(
-                        "INSERT INTO submissions(user_id,full_name,username,album_key,quote_text) "
-                        "VALUES (?,?,?,?,?)",
-                        (user_id, full_name, username, album_key, quote_text),
+                        "INSERT INTO submissions(user_id,full_name,username,album_key,quote_text,author_disclosure_consent) "
+                        "VALUES (?,?,?,?,?,?)",
+                        (user_id, full_name, username, album_key, quote_text, int(self.author_disclosure_enabled(user_id))),
                     )
                     submission_id, fresh = int(cur.lastrowid), True
             else:
                 cur = self.conn.execute(
-                    "INSERT INTO submissions(user_id,full_name,username,album_key,quote_text) "
-                    "VALUES (?,?,?,NULL,?)",
-                    (user_id, full_name, username, quote_text),
+                    "INSERT INTO submissions(user_id,full_name,username,album_key,quote_text,author_disclosure_consent) "
+                    "VALUES (?,?,?,NULL,?,?)",
+                    (user_id, full_name, username, quote_text, int(self.author_disclosure_enabled(user_id))),
                 )
                 submission_id, fresh = int(cur.lastrowid), True
 
@@ -377,17 +394,20 @@ class Storage:
         ).fetchone()
 
     def create_removal_payment(self, payment_id: str, order_id: str, submission_id: int,
-                               buyer_user_id: int, amount_rub: int) -> None:
+                               buyer_user_id: int, amount_rub: int, *, action: str = "post_removal") -> None:
+        if action not in {"post_removal", "author_lookup"}:
+            raise ValueError("Unsupported paid post action")
         with self.conn:
             self.conn.execute(
-                "INSERT INTO removal_payments(payment_id,order_id,submission_id,buyer_user_id,amount_rub) "
-                "VALUES(?,?,?,?,?)",
-                (payment_id, order_id, submission_id, buyer_user_id, amount_rub),
+                "INSERT INTO removal_payments(payment_id,order_id,submission_id,buyer_user_id,amount_rub,action) "
+                "VALUES(?,?,?,?,?,?)",
+                (payment_id, order_id, submission_id, buyer_user_id, amount_rub, action),
             )
 
     def pending_removal_payments(self) -> list[sqlite3.Row]:
         return list(self.conn.execute(
-            "SELECT p.*, s.published_chat_id, s.published_message_ids, s.removed_at "
+            "SELECT p.*, s.published_chat_id, s.published_message_ids, s.removed_at, "
+            "s.username, s.full_name, s.user_id, s.author_disclosure_consent "
             "FROM removal_payments p JOIN submissions s ON s.id=p.submission_id "
             "WHERE p.status IN ('created','processing') ORDER BY p.created_at LIMIT 50"
         ))
@@ -398,6 +418,62 @@ class Storage:
                 "UPDATE removal_payments SET status=?, paid_at=CASE WHEN ?='paid' THEN datetime('now') ELSE paid_at END "
                 "WHERE payment_id=? AND status!='paid'", (status[:32], status, payment_id)
             )
+
+    def author_disclosure_enabled(self, user_id: int) -> bool:
+        row = self.conn.execute(
+            "SELECT author_disclosure_opt_in FROM bot_users WHERE user_id=?", (user_id,)
+        ).fetchone()
+        return bool(row and row["author_disclosure_opt_in"])
+
+    def set_author_disclosure(self, user_id: int, enabled: bool) -> None:
+        with self.conn:
+            self.conn.execute(
+                "UPDATE bot_users SET author_disclosure_opt_in=? WHERE user_id=?",
+                (int(enabled), user_id),
+            )
+
+    def set_post_action(self, user_id: int, action: str) -> None:
+        if action not in {"post_removal", "author_lookup"}:
+            raise ValueError("Unknown post action")
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO post_action_sessions(user_id,action,created_at) VALUES(?,?,?) "
+                "ON CONFLICT(user_id) DO UPDATE SET action=excluded.action,created_at=excluded.created_at",
+                (user_id, action, int(time.time())),
+            )
+
+    def get_post_action(self, user_id: int) -> str | None:
+        row = self.conn.execute(
+            "SELECT action,created_at FROM post_action_sessions WHERE user_id=?",
+            (user_id,),
+        ).fetchone()
+        if row and int(time.time()) - int(row["created_at"]) <= 900:
+            return str(row["action"])
+        if row:
+            self.clear_post_action(user_id)
+        return None
+
+    def clear_post_action(self, user_id: int) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM post_action_sessions WHERE user_id=?", (user_id,))
+
+    def find_published_submission(
+        self, channel_id: str | int, message_id: int, *, channel_alias: str = ""
+    ) -> sqlite3.Row | None:
+        """Lookup only tracked copies; album and disclaimer IDs map to the same post."""
+        for row in self.conn.execute(
+            "SELECT * FROM submissions WHERE published_chat_id IN (?,?) "
+            "AND published_message_ids IS NOT NULL AND published_message_ids!='[]' "
+            "ORDER BY id DESC",
+            (str(channel_id), channel_alias or str(channel_id)),
+        ):
+            try:
+                ids = json.loads(row["published_message_ids"])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if isinstance(ids, list) and message_id in ids:
+                return row
+        return None
 
     def mark_removed(self, submission_id: int) -> None:
         with self.conn:
