@@ -68,6 +68,71 @@ class PostFooterTests(unittest.TestCase):
         ))
 
 
+
+class ChannelPublicationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_missing_removal_url_rejected_before_post_is_sent(self):
+        bot = AsyncMock()
+        with self.assertRaisesRegex(ValueError, "personal removal URL"):
+            await app.copy_submission(bot, -100123, 7)
+        bot.copy_message.assert_not_awaited()
+        bot.copy_messages.assert_not_awaited()
+
+    async def test_published_text_has_disclaimer_and_both_formatted_links(self):
+        bot = AsyncMock()
+        bot.copy_message.return_value = SimpleNamespace(message_id=501)
+        item = {
+            "message_id": 27,
+            "content_type": "text",
+            "content_text": "Привет 😃",
+            "entities_json": '[{"type":"bold","offset":0,"length":6}]',
+        }
+        removal_url = app.removal_deep_link(7, "abcdefghijklmnop")
+        with patch.object(app.db, "get", return_value={"user_id": 123}):
+            with patch.object(app.db, "items_for_submission", return_value=[item]):
+                copied_ids, footer_id = await app.copy_submission(
+                    bot, -100123, 7, removal_url=removal_url
+                )
+
+        self.assertEqual(copied_ids, [501])
+        self.assertIsNone(footer_id)
+        bot.copy_message.assert_awaited_once()
+        bot.edit_message_text.assert_awaited_once()
+        body = bot.edit_message_text.await_args.kwargs
+        self.assertEqual(body["message_id"], 501)
+        self.assertIn(app.PUBLICATION_DISCLAIMER, body["text"])
+        self.assertEqual(entity_text(body["text"], body["entities"][0]), "Привет")
+        links = [entity for entity in body["entities"] if entity.type == "text_link"]
+        self.assertEqual(
+            [(entity_text(body["text"], link), link.url) for link in links],
+            [("Удалить пост", removal_url), app.PUBLICATION_LINKS[1]],
+        )
+
+    async def test_sticker_footer_is_sent_and_tracked_for_paid_deletion(self):
+        bot = AsyncMock()
+        bot.copy_message.return_value = SimpleNamespace(message_id=700)
+        bot.send_message.return_value = SimpleNamespace(message_id=701)
+        item = {
+            "message_id": 28,
+            "content_type": "sticker",
+            "content_text": "",
+            "entities_json": "[]",
+        }
+        removal_url = app.removal_deep_link(8, "abcdefghijklmnop")
+        with patch.object(app.db, "get", return_value={"user_id": 123}):
+            with patch.object(app.db, "items_for_submission", return_value=[item]):
+                copied_ids, footer_id = await app.copy_submission(
+                    bot, -100123, 8, removal_url=removal_url
+                )
+        self.assertEqual(copied_ids, [700])
+        self.assertEqual(footer_id, 701)
+        sent = bot.send_message.await_args.kwargs
+        self.assertIn(app.PUBLICATION_DISCLAIMER, sent["text"])
+        self.assertTrue(any(
+            entity.type == "text_link" and entity.url == removal_url
+            for entity in sent["entities"]
+        ))
+
+
 class ModerationCommandTests(unittest.IsolatedAsyncioTestCase):
     async def test_private_admin_can_use_stats(self):
         message = SimpleNamespace(
