@@ -80,6 +80,10 @@ class PostActionStorageTests(unittest.TestCase):
         self.assertFalse(self.db.get(old_post)["author_disclosure_consent"])
         self.db.set_author_disclosure(105, False)
         self.assertFalse(self.db.author_disclosure_enabled(105))
+        self.assertFalse(self.db.get(new_post)["author_disclosure_consent"])
+        self.db.set_author_disclosure(105, True)
+        # Re-acceptance cannot expose a publication after consent was withdrawn.
+        self.assertFalse(self.db.get(new_post)["author_disclosure_consent"])
 
     def test_pending_payments_keep_both_actions_and_buyer(self):
         sid = self.create_public_post()
