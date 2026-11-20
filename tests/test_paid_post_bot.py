@@ -54,6 +54,28 @@ class PaidPostBotTests(unittest.IsolatedAsyncioTestCase):
                 await app.inbox(msg, AsyncMock())
         selected.assert_called_once_with(111, "author_lookup")
 
+    async def test_rejects_a_link_from_another_channel(self):
+        from post_lookup import InvalidPostLink
+
+        with patch.object(app, "destination_chat_id", return_value=-1001234567890):
+            with self.assertRaises(InvalidPostLink):
+                await app.resolve_post_from_link(
+                    AsyncMock(), "https://t.me/c/9999999999/700"
+                )
+
+    async def test_private_channel_post_resolves_to_stored_publication(self):
+        bot = AsyncMock()
+        stored = fake_submission()
+        with patch.object(app, "destination_chat_id", return_value=-1001234567890):
+            with patch.object(app, "destination_chat_value", return_value=-1001234567890):
+                with patch.object(app.db, "find_published_submission", return_value=stored) as find:
+                    post = await app.resolve_post_from_link(
+                        bot, "https://t.me/c/1234567890/700"
+                    )
+        self.assertIs(post, stored)
+        self.assertEqual(find.call_args.args, (-1001234567890, 700))
+        bot.get_chat.assert_not_awaited()
+
     async def test_unconsented_author_is_not_charged(self):
         msg = fake_message()
         with patch.object(app, "create_payment", new=AsyncMock()) as create:
