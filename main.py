@@ -1080,6 +1080,10 @@ async def configure_commands(bot: Bot) -> None:
                     BotCommand(command="unblock", description="Разблокировать пользователя"),
                     BotCommand(command="setdeleteprice", description="Цена удаления поста"),
                     BotCommand(command="setinfoprice", description="Цена сведений об авторе"),
+                    BotCommand(command="invoice", description="Создать счёт пользователю"),
+                    BotCommand(command="setticketprice", description="Цена билета розыгрыша"),
+                    BotCommand(command="giveaway", description="Создать розыгрыш"),
+                    BotCommand(command="drawgiveaway", description="Выбрать победителя"),
                     BotCommand(command="cleanbuttons", description="Убрать старые кнопки с сообщения"),
                 ],
                 scope=BotCommandScopeChat(chat_id=moderation_id),
@@ -1501,6 +1505,15 @@ async def reconcile_removal_payments(bot: Bot) -> None:
                         payment_id, exc,
                     )
                 await asyncio.sleep(0.05)
+            for ticket in db.pending_giveaway_tickets():
+                try:
+                    remote = await get_payment(api_base=ROLLYPAY_API_BASE, api_key=ROLLYPAY_API_KEY, payment_id=str(ticket['payment_id']))
+                    status = str(remote.get('status') or '').lower()
+                    if status == 'paid' and str(remote.get('order_id')) == str(ticket['order_id']) and Decimal(str(remote.get('amount'))) == Decimal(int(ticket['amount_rub'])) and str(remote.get('currency') or remote.get('payment_currency') or '').upper() == 'RUB':
+                        db.set_giveaway_ticket_status(str(ticket['payment_id']), 'paid')
+                        await safe_notify(bot, int(ticket['user_id']), f"Оплата подтверждена. Билет в розыгрыш «{html.escape(str(ticket['title']))}» получен.")
+                    elif status in {'expired', 'canceled', 'cancelled', 'failed'}: db.set_giveaway_ticket_status(str(ticket['payment_id']), status)
+                except (RollyPayError, InvalidOperation, TypeError, ValueError) as exc: logger.warning('Ticket reconciliation failed: %s', exc)
         await asyncio.sleep(12)
 
 @router.message(CommandStart(), F.chat.type == "private")
@@ -1605,6 +1618,91 @@ async def post_action_cancel(message: Message) -> None:
         "Ожидание ссылки отменено. Можешь отправить новый пост или выбрать кнопку.",
         reply_markup=POST_ACTION_KEYBOARD,
     )
+
+
+def ticket_price_rub() -> int:
+    raw = db.get_setting("giveaway_ticket_price_rub") or "100"
+    try: return max(1, min(100000, int(raw)))
+    except (TypeError, ValueError): return 100
+
+
+def giveaway_keyboard(giveaway_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Купить билет", callback_data=f"giveaway:buy:{giveaway_id}")],
+        [InlineKeyboardButton(text="Статистика", callback_data=f"giveaway:stats:{giveaway_id}")],
+    ])
+
+
+@router.message(Command("invoice"))
+async def invoice_command(message: Message, bot: Bot) -> None:
+    if not message.from_user or not await is_moderation_admin(bot, message.from_user.id):
+        await message.answer("Команда доступна только администраторам группы модерации."); return
+    parts = (message.text or "").split(maxsplit=3)
+    if len(parts) < 4 or not parts[1].lstrip('-').isdigit() or not parts[2].isdigit() or not 1 <= int(parts[2]) <= 100000:
+        await message.answer("Пример: <code>/invoice 123456789 500 Оплата услуги</code>"); return
+    buyer_id, amount, description = int(parts[1]), int(parts[2]), parts[3]
+    if not ROLLYPAY_API_KEY or not ROLLYPAY_TERMINAL_ID: await message.answer("Оплата RollyPay пока не настроена."); return
+    order_id = f"invoice-{uuid4().hex[:18]}"
+    try:
+        payment = await create_payment(api_base=ROLLYPAY_API_BASE, api_key=ROLLYPAY_API_KEY, terminal_id=ROLLYPAY_TERMINAL_ID, order_id=order_id, amount=Decimal(amount), description=description, customer_id=str(buyer_id), metadata={"action":"invoice","buyer_user_id":str(buyer_id),"created_by":str(message.from_user.id)}, test=ROLLYPAY_TEST_MODE, success_url=f"https://t.me/{PUBLIC_BOT_USERNAME}", fail_url=f"https://t.me/{PUBLIC_BOT_USERNAME}")
+        db.create_invoice(str(payment['payment_id']), order_id, buyer_id, message.from_user.id, amount, description)
+        await bot.send_message(buyer_id, f"<b>Счёт на оплату</b>\n{html.escape(description)}\nСумма: <b>{amount} ₽</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Оплатить", url=str(payment['pay_url']))]]))
+    except (RollyPayError, KeyError, ValueError, TelegramAPIError): await message.answer("Не удалось создать или отправить счёт."); return
+    await message.answer(f"Счёт на <b>{amount} ₽</b> отправлен пользователю <code>{buyer_id}</code>.")
+
+
+@router.message(Command("setticketprice"))
+async def set_ticket_price_command(message: Message, bot: Bot) -> None:
+    if not message.from_user or not await is_moderation_admin(bot, message.from_user.id):
+        await message.answer("Команда доступна только администраторам группы модерации."); return
+    value = (message.text or "").split(maxsplit=1)
+    if len(value) != 2 or not value[1].isdigit() or not 1 <= int(value[1]) <= 100000:
+        await message.answer(f"Текущая цена билета: <b>{ticket_price_rub()} ₽</b>\nПример: <code>/setticketprice 100</code>"); return
+    db.set_setting("giveaway_ticket_price_rub", value[1])
+    await message.answer(f"Цена билета: <b>{value[1]} ₽</b>.")
+
+
+@router.message(Command("giveaway"))
+async def giveaway_command(message: Message, bot: Bot) -> None:
+    if not message.from_user or not await is_moderation_admin(bot, message.from_user.id):
+        await message.answer("Команда доступна только администраторам группы модерации."); return
+    title = (message.text or "").partition(" ")[2].strip()
+    if not title:
+        await message.answer("Пример: <code>/giveaway Розыгрыш Telegram Premium</code>"); return
+    giveaway_id = db.create_giveaway(title, ticket_price_rub(), message.from_user.id, message.chat.id)
+    card = await message.answer(f"<b>Розыгрыш #{giveaway_id}</b>\n{html.escape(title)}\n\nБилет: <b>{ticket_price_rub()} ₽</b>", reply_markup=giveaway_keyboard(giveaway_id))
+    db.set_giveaway_message(giveaway_id, card.message_id)
+
+
+@router.callback_query(F.data.startswith("giveaway:"))
+async def giveaway_callback(callback: CallbackQuery, bot: Bot) -> None:
+    if not callback.from_user or not callback.data: return
+    _, action, raw_id = callback.data.split(":")
+    if not raw_id.isdigit(): return
+    giveaway = db.giveaway(int(raw_id))
+    if not giveaway: await callback.answer("Розыгрыш не найден.", show_alert=True); return
+    if action == "stats":
+        if not await is_moderation_admin(bot, callback.from_user.id): await callback.answer("Статистика только для админов.", show_alert=True); return
+        stats = db.giveaway_stats(int(raw_id)); await callback.answer()
+        await callback.message.answer(f"<b>Статистика розыгрыша #{raw_id}</b>\nБилетов: <b>{stats['tickets']}</b>\nУчастников: <b>{stats['buyers']}</b>\nСобрано: <b>{stats['revenue']} ₽</b>"); return
+    if action != "buy" or giveaway['status'] != 'active': await callback.answer("Розыгрыш завершён.", show_alert=True); return
+    if not ROLLYPAY_API_KEY or not ROLLYPAY_TERMINAL_ID: await callback.answer("Оплата пока не настроена.", show_alert=True); return
+    order_id = f"ticket-{raw_id}-{uuid4().hex[:16]}"
+    try:
+        payment = await create_payment(api_base=ROLLYPAY_API_BASE, api_key=ROLLYPAY_API_KEY, terminal_id=ROLLYPAY_TERMINAL_ID, order_id=order_id, amount=Decimal(int(giveaway['ticket_price_rub'])), description=f"Билет в розыгрыш #{raw_id}", customer_id=str(callback.from_user.id), metadata={"action":"giveaway_ticket","giveaway_id":raw_id,"buyer_user_id":str(callback.from_user.id)}, test=ROLLYPAY_TEST_MODE, success_url=f"https://t.me/{PUBLIC_BOT_USERNAME}", fail_url=f"https://t.me/{PUBLIC_BOT_USERNAME}")
+        db.create_giveaway_ticket(str(payment['payment_id']), order_id, int(raw_id), callback.from_user.id, int(giveaway['ticket_price_rub']))
+    except (RollyPayError, KeyError, ValueError): await callback.answer("Не удалось создать оплату.", show_alert=True); return
+    await callback.answer(); await callback.message.answer(f"Билет: <b>{giveaway['ticket_price_rub']} ₽</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Оплатить билет", url=str(payment['pay_url']))]]))
+
+
+@router.message(Command("drawgiveaway"))
+async def draw_giveaway_command(message: Message, bot: Bot) -> None:
+    if not message.from_user or not await is_moderation_admin(bot, message.from_user.id):
+        await message.answer("Команда доступна только администраторам группы модерации."); return
+    raw = (message.text or "").partition(" ")[2].strip()
+    if not raw.isdigit(): await message.answer("Пример: <code>/drawgiveaway 1</code>"); return
+    winner = db.draw_giveaway(int(raw))
+    await message.answer(f"Победитель розыгрыша #{raw}: <code>{winner}</code>" if winner else "Нет оплаченных билетов или розыгрыш уже завершён.")
 
 
 async def can_view_moderation_stats(message: Message, bot: Bot) -> bool:

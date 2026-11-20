@@ -130,6 +130,25 @@ class Storage:
                 action TEXT NOT NULL,
                 created_at INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS invoices (
+                payment_id TEXT PRIMARY KEY, order_id TEXT NOT NULL UNIQUE,
+                buyer_user_id INTEGER NOT NULL, created_by_id INTEGER NOT NULL,
+                amount_rub INTEGER NOT NULL, description TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'created', created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                paid_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS giveaways (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL,
+                ticket_price_rub INTEGER NOT NULL, created_by_id INTEGER NOT NULL,
+                chat_id INTEGER NOT NULL, message_id INTEGER, status TEXT NOT NULL DEFAULT 'active',
+                winner_user_id INTEGER, created_at TEXT NOT NULL DEFAULT (datetime('now')), drawn_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS giveaway_tickets (
+                payment_id TEXT PRIMARY KEY, giveaway_id INTEGER NOT NULL REFERENCES giveaways(id),
+                user_id INTEGER NOT NULL, order_id TEXT NOT NULL UNIQUE, amount_rub INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'created', created_at TEXT NOT NULL DEFAULT (datetime('now')), paid_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS giveaway_tickets_pending_idx ON giveaway_tickets(status, created_at);
         """)
 
         # Add fields when opening databases made by the earlier direct-publication version.
@@ -789,6 +808,50 @@ class Storage:
                 "SELECT id FROM submissions WHERE status='collecting' ORDER BY id ASC"
             )
         ]
+
+    def create_invoice(self, payment_id: str, order_id: str, buyer_id: int, admin_id: int, amount: int, description: str) -> None:
+        with self.conn:
+            self.conn.execute("INSERT INTO invoices(payment_id,order_id,buyer_user_id,created_by_id,amount_rub,description) VALUES(?,?,?,?,?,?)", (payment_id, order_id, buyer_id, admin_id, amount, description[:255]))
+
+    def pending_invoices(self) -> list[sqlite3.Row]:
+        return list(self.conn.execute("SELECT * FROM invoices WHERE status='created' ORDER BY created_at LIMIT 50"))
+
+    def set_invoice_status(self, payment_id: str, status: str) -> None:
+        with self.conn:
+            self.conn.execute("UPDATE invoices SET status=?, paid_at=CASE WHEN ?='paid' THEN datetime('now') ELSE paid_at END WHERE payment_id=? AND status!='paid'", (status, status, payment_id))
+
+    def create_giveaway(self, title: str, price: int, admin_id: int, chat_id: int) -> int:
+        with self.conn:
+            cur = self.conn.execute("INSERT INTO giveaways(title,ticket_price_rub,created_by_id,chat_id) VALUES(?,?,?,?)", (title[:180], price, admin_id, chat_id))
+            return int(cur.lastrowid)
+
+    def set_giveaway_message(self, giveaway_id: int, message_id: int) -> None:
+        with self.conn:
+            self.conn.execute("UPDATE giveaways SET message_id=? WHERE id=?", (message_id, giveaway_id))
+
+    def giveaway(self, giveaway_id: int) -> sqlite3.Row | None:
+        return self.conn.execute("SELECT * FROM giveaways WHERE id=?", (giveaway_id,)).fetchone()
+
+    def create_giveaway_ticket(self, payment_id: str, order_id: str, giveaway_id: int, user_id: int, amount: int) -> None:
+        with self.conn:
+            self.conn.execute("INSERT INTO giveaway_tickets(payment_id,giveaway_id,user_id,order_id,amount_rub) VALUES(?,?,?,?,?)", (payment_id, giveaway_id, user_id, order_id, amount))
+
+    def pending_giveaway_tickets(self) -> list[sqlite3.Row]:
+        return list(self.conn.execute("SELECT t.*, g.title, g.status AS giveaway_status FROM giveaway_tickets t JOIN giveaways g ON g.id=t.giveaway_id WHERE t.status='created' ORDER BY t.created_at LIMIT 50"))
+
+    def set_giveaway_ticket_status(self, payment_id: str, status: str) -> None:
+        with self.conn:
+            self.conn.execute("UPDATE giveaway_tickets SET status=?, paid_at=CASE WHEN ?='paid' THEN datetime('now') ELSE paid_at END WHERE payment_id=? AND status!='paid'", (status, status, payment_id))
+
+    def giveaway_stats(self, giveaway_id: int) -> sqlite3.Row | None:
+        return self.conn.execute("SELECT g.*, COUNT(CASE WHEN t.status='paid' THEN 1 END) tickets, COUNT(DISTINCT CASE WHEN t.status='paid' THEN t.user_id END) buyers, COALESCE(SUM(CASE WHEN t.status='paid' THEN t.amount_rub END),0) revenue FROM giveaways g LEFT JOIN giveaway_tickets t ON t.giveaway_id=g.id WHERE g.id=? GROUP BY g.id", (giveaway_id,)).fetchone()
+
+    def draw_giveaway(self, giveaway_id: int) -> int | None:
+        row = self.conn.execute("SELECT user_id FROM giveaway_tickets WHERE giveaway_id=? AND status='paid' ORDER BY RANDOM() LIMIT 1", (giveaway_id,)).fetchone()
+        if not row: return None
+        with self.conn:
+            self.conn.execute("UPDATE giveaways SET status='drawn', winner_user_id=?, drawn_at=datetime('now') WHERE id=? AND status='active'", (int(row['user_id']), giveaway_id))
+        return int(row['user_id'])
 
     def close(self) -> None:
         self.conn.close()
