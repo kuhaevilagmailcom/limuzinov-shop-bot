@@ -9,6 +9,35 @@ import time
 from pathlib import Path
 
 
+def resolve_database_path(
+    project_dir: Path,
+    *,
+    configured_path: str = "",
+    data_dir: str = "",
+) -> str:
+    """Use BotHost's persistent data volume; migrate legacy DB with SQLite backup."""
+    if configured_path.strip():
+        return configured_path.strip()
+    legacy = project_dir / "suggestions.sqlite3"
+    if not data_dir.strip():
+        return str(legacy)
+
+    target = Path(data_dir.strip()).expanduser() / "suggestions.sqlite3"
+    if target.resolve() == legacy.resolve():
+        return str(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    # Backup API copies committed rows AND WAL pages safely, unlike shutil.copy.
+    if (not target.exists() or target.stat().st_size == 0) and (
+        legacy.is_file() and legacy.stat().st_size > 0
+    ):
+        with sqlite3.connect(str(legacy)) as source:
+            with sqlite3.connect(str(target)) as destination:
+                source.backup(destination)
+
+    return str(target)
+
+
 class Storage:
     def __init__(self, db_path: str):
         Path(db_path).expanduser().parent.mkdir(parents=True, exist_ok=True)
@@ -339,7 +368,10 @@ class Storage:
 
     def removal_target(self, submission_id: int, token: str) -> sqlite3.Row | None:
         return self.conn.execute(
-            "SELECT * FROM submissions WHERE id=? AND removal_token=? AND status='published'",
+            "SELECT * FROM submissions "
+            "WHERE id=? AND removal_token=? "
+            "AND published_chat_id IS NOT NULL AND published_chat_id!='' "
+            "AND published_message_ids IS NOT NULL AND published_message_ids!='[]'",
             (submission_id, token),
         ).fetchone()
 
