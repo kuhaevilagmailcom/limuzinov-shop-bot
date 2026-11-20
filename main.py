@@ -1482,9 +1482,9 @@ async def reconcile_removal_payments(bot: Bot) -> None:
                             await bot.send_message(
                                 chat_id=int(payment["buyer_user_id"]),
                                 text=(
-                                    "<b>Информация об авторе публикации</b>\\n\\n"
-                                    f"Ник: <b>{full_name}</b>\\n"
-                                    f"Username: <b>{display_username}</b>\\n"
+                                    "<b>Информация об авторе публикации</b>\n\n"
+                                    f"Ник: <b>{full_name}</b>\n"
+                                    f"Username: <b>{display_username}</b>\n"
                                     f"Telegram ID: <code>{int(payment['user_id'])}</code>"
                                 ),
                                 reply_markup=POST_ACTION_KEYBOARD,
