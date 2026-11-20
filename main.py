@@ -875,8 +875,12 @@ async def copy_submission(
     sub_id: int,
     *,
     moderation_controls: bool = False,
+    removal_url: str | None = None,
 ) -> tuple[list[int], int | None]:
-    """Copy one message or an album; make moderation controls available on every item."""
+    """Copy an album or post, ensuring every public post gets its attribution footer."""
+    # Validate before copying to avoid leaving an untracked, unformatted post.
+    if not moderation_controls and not removal_url:
+        raise ValueError("A published post requires its personal removal URL")
     sub = db.get(sub_id)
     items = db.items_for_submission(sub_id)
     message_ids = [int(item["message_id"]) for item in items]
@@ -946,8 +950,10 @@ async def copy_submission(
             return copied_ids, control_card.message_id
         return copied_ids, None
 
-    await add_publication_disclaimer(bot, destination, copied_ids, items)
-    return copied_ids, None
+    footer_id = await add_publication_disclaimer(
+        bot, destination, copied_ids, items, removal_url
+    )
+    return copied_ids, footer_id
 
 async def send_to_moderation_group(bot: Bot, sub_id: int) -> None:
     if not db.move(sub_id, "collecting", "notifying"):
@@ -2248,11 +2254,10 @@ async def moderate(callback: CallbackQuery, bot: Bot) -> None:
 
         try:
             # Publish the original submission and append the quoted disclaimer.
-            copied_ids, _ = await copy_submission(bot, target, sub_id)
             removal_token = db.ensure_removal_token(sub_id)
-            footer_id = await add_publication_disclaimer(
-                bot, target, copied_ids, db.items_for_submission(sub_id),
-                removal_deep_link(sub_id, removal_token),
+            copied_ids, footer_id = await copy_submission(
+                bot, target, sub_id,
+                removal_url=removal_deep_link(sub_id, removal_token),
             )
             published_ids = copied_ids + ([footer_id] if footer_id else [])
             db.set_publication(sub_id, target, published_ids)
