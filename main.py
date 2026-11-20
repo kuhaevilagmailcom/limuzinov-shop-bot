@@ -1440,37 +1440,87 @@ async def delete_published_submission(bot: Bot, sub, message_ids: list[int]) -> 
 
 
 async def reconcile_removal_payments(bot: Bot) -> None:
+    """Poll RollyPay independently of website webhook; fulfill both paid actions."""
     while True:
         if ROLLYPAY_API_KEY:
             for payment in db.pending_removal_payments():
+                payment_id = str(payment["payment_id"])
                 try:
                     remote = await get_payment(
                         api_base=ROLLYPAY_API_BASE, api_key=ROLLYPAY_API_KEY,
-                        payment_id=str(payment["payment_id"]),
+                        payment_id=payment_id,
                     )
                     status = str(remote.get("status") or "").lower()
                     if status == "paid":
                         currency = str(remote.get("currency") or remote.get("payment_currency") or "").upper()
                         amount = Decimal(str(remote.get("amount")))
                         if (
-                            str(remote.get("payment_id")) != str(payment["payment_id"])
+                            str(remote.get("payment_id")) != payment_id
                             or str(remote.get("order_id")) != str(payment["order_id"])
                             or currency != "RUB"
                             or amount != Decimal(int(payment["amount_rub"]))
+                            or (bool(remote.get("test")) and not ROLLYPAY_TEST_MODE)
                         ):
-                            logger.error("Paid removal payment failed exact validation: %s", payment["payment_id"])
+                            logger.error("Paid post action failed exact validation: %s", payment_id)
                             continue
-                        if await delete_published_submission(bot, payment, published_message_ids(payment)):
-                            db.mark_removed(int(payment["submission_id"]))
-                            db.set_removal_payment_status(str(payment["payment_id"]), "paid")
-                            await safe_notify(bot, int(payment["buyer_user_id"]), f"{ce('check')} Оплата подтверждена. Пост удалён.")
-                    elif status in {"expired", "canceled", "cancelled", "failed", "processing"}:
-                        db.set_removal_payment_status(str(payment["payment_id"]), status)
+                        action = str(payment["action"] or "post_removal")
+                        if action == "author_lookup":
+                            if not may_disclose_author(payment):
+                                db.set_removal_payment_status(payment_id, "paid_consent_revoked")
+                                await safe_notify(
+                                    bot, int(payment["buyer_user_id"]),
+                                    "Автор запретил раскрытие данных. Информация не выдаётся. "
+                                    "Обратитесь к администратору за возвратом платежа.",
+                                )
+                                continue
+                            full_name = html.escape(str(payment["full_name"] or "Без имени"))
+                            username = str(payment["username"] or "").strip()
+                            display_username = (
+                                "@" + html.escape(username.lstrip("@"))
+                                if username else "не указан"
+                            )
+                            await bot.send_message(
+                                chat_id=int(payment["buyer_user_id"]),
+                                text=(
+                                    "<b>Информация об авторе публикации</b>\\n\\n"
+                                    f"Ник: <b>{full_name}</b>\\n"
+                                    f"Username: <b>{display_username}</b>\\n"
+                                    f"Telegram ID: <code>{int(payment['user_id'])}</code>"
+                                ),
+                                reply_markup=POST_ACTION_KEYBOARD,
+                            )
+                            db.set_removal_payment_status(payment_id, "paid")
+                        elif action == "post_removal":
+                            if payment["removed_at"]:
+                                db.set_removal_payment_status(payment_id, "paid_duplicate")
+                                await safe_notify(
+                                    bot, int(payment["buyer_user_id"]),
+                                    "Платёж подтверждён, но этот пост уже удалён. "
+                                    "Обратитесь к администратору за возвратом повторной оплаты.",
+                                )
+                                continue
+                            if await delete_published_submission(
+                                bot, payment, published_message_ids(payment)
+                            ):
+                                db.mark_removed(int(payment["submission_id"]))
+                                db.set_removal_payment_status(payment_id, "paid")
+                                await safe_notify(
+                                    bot, int(payment["buyer_user_id"]),
+                                    f"{ce('check')} Оплата подтверждена. Пост удалён.",
+                                )
+                        else:
+                            logger.error("Unknown paid post action %r in %s", action, payment_id)
+                    elif status in {"expired", "canceled", "cancelled", "failed"}:
+                        db.set_removal_payment_status(payment_id, status)
                 except (RollyPayError, InvalidOperation, TypeError, ValueError) as exc:
-                    logger.debug("Removal payment reconciliation failed: %s", exc)
+                    logger.warning("Paid action reconciliation failed for %s: %s", payment_id, exc)
+                except TelegramAPIError as exc:
+                    logger.warning(
+                        "Could not deliver paid post action to buyer (will retry) %s: %s",
+                        payment_id, exc,
+                    )
                 await asyncio.sleep(0.05)
         await asyncio.sleep(12)
-
 
 @router.message(CommandStart(), F.chat.type == "private")
 async def start(message: Message, bot: Bot) -> None:
