@@ -58,10 +58,9 @@ PUBLIC_BOT_USERNAME = os.getenv("PUBLIC_BOT_USERNAME", "PozorMgnBot").strip().ls
 DEFAULT_REMOVAL_PRICE_RUB = 100
 DEFAULT_AUTHOR_INFO_PRICE_RUB = 100
 
-POST_ACTION_BUTTONS = {"Удалить пост": "post_removal", "Узнать, кто выложил": "author_lookup"}
+POST_ACTION_BUTTONS = {"Узнать, кто выложил": "author_lookup"}
 POST_ACTION_KEYBOARD = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="Удалить пост")],
         [KeyboardButton(text="Узнать, кто выложил")],
     ],
     resize_keyboard=True,
@@ -1061,7 +1060,6 @@ async def configure_commands(bot: Bot) -> None:
 
     start_command = [
         BotCommand(command="start", description="Отправить предложение"),
-        BotCommand(command="deletepost", description="Удалить пост по ссылке"),
         BotCommand(command="who", description="Узнать автора по ссылке"),
         BotCommand(command="cancel", description="Отменить выбор действия"),
         BotCommand(command="help", description="Помощь"),
@@ -1078,7 +1076,6 @@ async def configure_commands(bot: Bot) -> None:
                     BotCommand(command="done", description="Рассылка пользователям"),
                     BotCommand(command="users", description="Список пользователей"),
                     BotCommand(command="unblock", description="Разблокировать пользователя"),
-                    BotCommand(command="setdeleteprice", description="Цена удаления поста"),
                     BotCommand(command="setinfoprice", description="Цена сведений об авторе"),
                     BotCommand(command="cleanbuttons", description="Убрать старые кнопки с сообщения"),
                 ],
@@ -1278,15 +1275,8 @@ def author_info_price_rub() -> int:
         return DEFAULT_AUTHOR_INFO_PRICE_RUB
 
 
-def may_disclose_author(sub) -> bool:
-    return bool(
-        sub["author_disclosure_consent"]
-        and db.author_disclosure_enabled(int(sub["user_id"]))
-    )
-
-
 async def start_post_action_payment(message: Message, sub, action: str) -> bool:
-    """Create a fresh invoice only for a verified tracked post and permitted action."""
+    """Create a fresh invoice for a verified tracked post."""
     if not sub:
         await message.answer(
             "Не нашёл эту публикацию в базе. Ссылки из других каналов не принимаются."
@@ -1301,23 +1291,17 @@ async def start_post_action_payment(message: Message, sub, action: str) -> bool:
             "Этот пост пока не готов к оплате: нет данных публикации. Обратись к администратору."
         )
         return False
-    if action == "author_lookup" and not may_disclose_author(sub):
-        await message.answer(
-            "Для этой публикации автор не разрешил раскрывать свои данные. "
-            "Оплату не создаём."
-        )
-        return False
-    if action not in {"post_removal", "author_lookup"}:
+    if action != "author_lookup":
         await message.answer("Неизвестное действие. Выбери кнопку ещё раз.")
         return False
     if not ROLLYPAY_API_KEY or not ROLLYPAY_TERMINAL_ID:
         await message.answer("Оплата RollyPay пока не настроена. Обратись к администратору.")
         return False
 
-    amount = removal_price_rub() if action == "post_removal" else author_info_price_rub()
-    prefix = "postrm" if action == "post_removal" else "postinfo"
+    amount = author_info_price_rub()
+    prefix = "postinfo"
     order_id = f"{prefix}-{int(sub['id'])}-{uuid4().hex[:16]}"
-    title = "Удаление поста" if action == "post_removal" else "Информация об авторе"
+    title = "Автор публикации"
     metadata = {
         "action": action,
         "submission_id": str(sub["id"]),
@@ -1345,14 +1329,10 @@ async def start_post_action_payment(message: Message, sub, action: str) -> bool:
         await message.answer("Не удалось создать оплату. Попробуй ещё раз.")
         return False
 
-    explanation = (
-        "После подтверждения оплаты пост и все части альбома будут удалены."
-        if action == "post_removal"
-        else "После подтверждения оплаты бот пришлёт ник, @username и Telegram ID автора."
-    )
     await message.answer(
-        f"<b>{title} #{int(sub['id'])}</b>\n\n"
-        f"Стоимость: <b>{amount} ₽</b>. {explanation}",
+        "Публикация найдена.\n"
+        f"Стоимость получения информации: <b>{amount} ₽</b>\n"
+        "Оплата через RollyPay",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text=f"Оплатить {amount} ₽", url=str(payment["pay_url"]))
         ]]),
@@ -1439,9 +1419,7 @@ async def delete_published_submission(bot: Bot, sub, message_ids: list[int]) -> 
 
 
 async def deliver_author_info(bot: Bot, payment) -> None:
-    """Send paid identity details only after consent and payment verification."""
-    if not may_disclose_author(payment):
-        raise ValueError("Author did not consent to disclosure")
+    """Send verified paid identity details to the buyer."""
     full_name = html.escape(str(payment["full_name"] or "Без имени"))
     username = str(payment["username"] or "").strip()
     display_username = "@" + html.escape(username.lstrip("@")) if username else "не указан"
@@ -1483,14 +1461,6 @@ async def reconcile_removal_payments(bot: Bot) -> None:
                             continue
                         action = str(payment["action"] or "post_removal")
                         if action == "author_lookup":
-                            if not may_disclose_author(payment):
-                                db.set_removal_payment_status(payment_id, "paid_consent_revoked")
-                                await safe_notify(
-                                    bot, int(payment["buyer_user_id"]),
-                                    "Автор запретил раскрытие данных. Информация не выдаётся. "
-                                    "Обратитесь к администратору за возвратом платежа.",
-                                )
-                                continue
                             await deliver_author_info(bot, payment)
                             db.set_removal_payment_status(payment_id, "paid")
                         elif action == "post_removal":
@@ -1540,7 +1510,7 @@ async def start(message: Message, bot: Bot) -> None:
         match = re.fullmatch(r"remove_(\d+)_([A-Za-z0-9_-]{12,40})", payload[1].strip())
         if match:
             await message.answer(
-                "В боте доступны два действия с постами по ссылке.",
+                "В боте доступно получение информации об авторе публикации.",
                 reply_markup=POST_ACTION_KEYBOARD,
             )
             await start_removal_payment(message, int(match.group(1)), match.group(2))
@@ -1556,8 +1526,7 @@ async def start(message: Message, bot: Bot) -> None:
     await safe_answer(
         message,
         f"{ce('wave')} <b>Предложка</b>\n\n"
-        "Отправь текст или медиа для публикации, либо выбери действие ниже.\n"
-        "«Удалить пост» и «Узнать, кто выложил» принимают ссылку на сообщение из канала.",
+        "Отправь текст или медиа для публикации, либо выбери действие ниже.",
         reply_markup=POST_ACTION_KEYBOARD,
     )
 
@@ -1575,8 +1544,7 @@ async def help_command(message: Message, bot: Bot) -> None:
             message,
             "ℹ️ <b>Доступные команды</b>\n"
             "/start — отправить предложение\n"
-            "/deletepost — удалить пост по ссылке после оплаты\n"
-            "/who — узнать автора после оплаты, если он согласился\n"
+            "/who — узнать автора публикации после оплаты\n"
             "/cancel — отменить ожидание ссылки\n"
             "/help — показать эту справку",
             reply_markup=POST_ACTION_KEYBOARD,
@@ -1592,7 +1560,6 @@ async def help_command(message: Message, bot: Bot) -> None:
         "/done ТЕКСТ — рассылка всем пользователям; также можно ответить командой /done на сообщение "
         "и разослать его (после подтверждения)\n"
         "/unblock USER_ID — снять блокировку\n"
-        "/setdeleteprice СУММА — изменить цену удаления поста в рублях\n"
         "/setinfoprice СУММА — изменить цену сведений об авторе в рублях\n"
         "/cleanbuttons — убрать кнопки с сообщения, на которое ответили; "
         "/cleanbuttons POST_ID — убрать кнопки в канале\n"
@@ -1600,57 +1567,15 @@ async def help_command(message: Message, bot: Bot) -> None:
     )
 
 
-@router.message(Command("authorprivacy"), F.chat.type == "private")
-async def author_privacy_command(message: Message) -> None:
-    if not message.from_user:
-        return
-    user = message.from_user
-    db.register_user(user.id, user.username, user.full_name)
-    state = "разрешено" if db.author_disclosure_enabled(user.id) else "запрещено"
-    await message.answer(
-        "Разрешить показ имени, @username и Telegram ID другим людям после оплаты?\n"
-        f"Сейчас: <b>{state}</b>.",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Разрешаю раскрытие данных", callback_data="privacy:allow")],
-            [InlineKeyboardButton(text="Запретить раскрытие данных", callback_data="privacy:deny")],
-        ]),
-    )
-
-
-@router.callback_query(F.data.startswith("privacy:"))
-async def author_privacy_callback(callback: CallbackQuery) -> None:
-    if not callback.from_user or not callback.message:
-        await callback.answer("Действие недоступно.", show_alert=True)
-        return
-    if callback.message.chat.type != "private":
-        await callback.answer("Настройка доступна в личке.", show_alert=True)
-        return
-    choice = (callback.data or "").split(":")[-1]
-    if choice not in {"allow", "deny"}:
-        await callback.answer("Неизвестное действие.", show_alert=True)
-        return
-    user = callback.from_user
-    db.register_user(user.id, user.username, user.full_name)
-    db.set_author_disclosure(user.id, choice == "allow")
-    await callback.answer("Настройка сохранена.")
-    await callback.message.answer(
-        "Согласие на раскрытие авторства включено для будущих публикаций."
-        if choice == "allow" else
-        "Раскрытие авторства отключено; новые запросы на ваши данные не продаются.",
-        reply_markup=POST_ACTION_KEYBOARD,
-    )
-
-
-@router.message(Command("deletepost", "who"), F.chat.type == "private")
+@router.message(Command("who"), F.chat.type == "private")
 async def post_action_command(message: Message) -> None:
     if not message.from_user:
         return
-    action = "author_lookup" if (message.text or "").split()[0].split("@")[0] == "/who" else "post_removal"
+    action = "author_lookup"
     db.set_post_action(message.from_user.id, action)
-    title = "узнать, кто выложил" if action == "author_lookup" else "удалить"
     await message.answer(
-        f"Чтобы {title} пост, пришли ссылку на него из канала.\n"
-        "Пример: <code>https://t.me/c/1234567890/123</code>",
+        "Пришлите ссылку на публикацию из канала.\n"
+        "Пример: <code>https://t.me/c/1234567890/456</code>",
         reply_markup=POST_ACTION_KEYBOARD,
     )
 
@@ -1898,13 +1823,9 @@ async def inbox(message: Message, bot: Bot) -> None:
     if requested in POST_ACTION_BUTTONS:
         action = POST_ACTION_BUTTONS[requested]
         db.set_post_action(sender_id, action)
-        text = (
-            "Пришли ссылку на пост из канала, который нужно удалить."
-            if action == "post_removal" else
-            "Пришли ссылку на пост из канала, автора которого хочешь узнать."
-        )
         await message.answer(
-            text + "\nПример: <code>https://t.me/c/1234567890/123</code>",
+            "Пришлите ссылку на публикацию из канала.\n"
+            "Пример: <code>https://t.me/c/1234567890/456</code>",
             reply_markup=POST_ACTION_KEYBOARD,
         )
         return
@@ -1918,8 +1839,7 @@ async def inbox(message: Message, bot: Bot) -> None:
 
     if requested.startswith(("https://t.me/", "https://telegram.me/")):
         await message.answer(
-            "Сначала нажми «Удалить пост» или «Узнать, кто выложил», "
-            "а затем отправь ссылку.",
+            "Нажмите «Узнать, кто выложил», затем отправьте ссылку.",
             reply_markup=POST_ACTION_KEYBOARD,
         )
         return
