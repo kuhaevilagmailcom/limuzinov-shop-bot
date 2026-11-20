@@ -1439,6 +1439,25 @@ async def delete_published_submission(bot: Bot, sub, message_ids: list[int]) -> 
     return True
 
 
+async def deliver_author_info(bot: Bot, payment) -> None:
+    """Send paid identity details only after consent and payment verification."""
+    if not may_disclose_author(payment):
+        raise ValueError("Author did not consent to disclosure")
+    full_name = html.escape(str(payment["full_name"] or "Без имени"))
+    username = str(payment["username"] or "").strip()
+    display_username = "@" + html.escape(username.lstrip("@")) if username else "не указан"
+    await bot.send_message(
+        chat_id=int(payment["buyer_user_id"]),
+        text=(
+            "<b>Информация об авторе публикации</b>\n\n"
+            f"Ник: <b>{full_name}</b>\n"
+            f"Username: <b>{display_username}</b>\n"
+            f"Telegram ID: <code>{int(payment['user_id'])}</code>"
+        ),
+        reply_markup=POST_ACTION_KEYBOARD,
+    )
+
+
 async def reconcile_removal_payments(bot: Bot) -> None:
     """Poll RollyPay independently of website webhook; fulfill both paid actions."""
     while True:
@@ -1473,22 +1492,7 @@ async def reconcile_removal_payments(bot: Bot) -> None:
                                     "Обратитесь к администратору за возвратом платежа.",
                                 )
                                 continue
-                            full_name = html.escape(str(payment["full_name"] or "Без имени"))
-                            username = str(payment["username"] or "").strip()
-                            display_username = (
-                                "@" + html.escape(username.lstrip("@"))
-                                if username else "не указан"
-                            )
-                            await bot.send_message(
-                                chat_id=int(payment["buyer_user_id"]),
-                                text=(
-                                    "<b>Информация об авторе публикации</b>\n\n"
-                                    f"Ник: <b>{full_name}</b>\n"
-                                    f"Username: <b>{display_username}</b>\n"
-                                    f"Telegram ID: <code>{int(payment['user_id'])}</code>"
-                                ),
-                                reply_markup=POST_ACTION_KEYBOARD,
-                            )
+                            await deliver_author_info(bot, payment)
                             db.set_removal_payment_status(payment_id, "paid")
                         elif action == "post_removal":
                             if payment["removed_at"]:
