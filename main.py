@@ -35,13 +35,17 @@ from aiogram.types import (
 )
 from dotenv import load_dotenv
 
-from storage import Storage
+from storage import Storage, resolve_database_path
 from payments import RollyPayError, create_payment, get_payment
 
 ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-DB_PATH = os.getenv("DB_PATH", str(ROOT / "suggestions.sqlite3"))
+DB_PATH = resolve_database_path(
+    ROOT,
+    configured_path=os.getenv("DB_PATH", ""),
+    data_dir=os.getenv("DATA_DIR", "/app/data" if ROOT == Path("/app") else ""),
+)
 ROLLYPAY_API_BASE = os.getenv("ROLLYPAY_API_BASE", "https://rollypay.io").rstrip("/")
 ROLLYPAY_API_KEY = os.getenv("ROLLYPAY_API_KEY", "").strip()
 ROLLYPAY_TERMINAL_ID = os.getenv("ROLLYPAY_TERMINAL_ID", "").strip()
@@ -1248,8 +1252,14 @@ def published_message_ids(sub) -> list[int]:
 
 async def start_removal_payment(message: Message, submission_id: int, token: str) -> None:
     sub = db.removal_target(submission_id, token)
-    if not sub or sub["removed_at"]:
-        await message.answer("Этот пост уже удалён или ссылка больше не действует.")
+    if not sub:
+        await message.answer(\n            "Не удалось найти данные этой публикации. Пост мог остаться в канале после "
+            "перезапуска со старой базой. Обратись к администратору, чтобы восстановить "
+            "ссылку — оплату за неизвестный пост не создаём."
+        )
+        return
+    if sub["removed_at"]:
+        await message.answer("Пост уже удалён после подтверждённой оплаты.")
         return
     message_ids = published_message_ids(sub)
     if not sub["published_chat_id"] or not message_ids:
