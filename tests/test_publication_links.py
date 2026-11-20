@@ -42,11 +42,13 @@ class PostFooterTests(unittest.TestCase):
             self.assertEqual(entity_text(content, entity), label)
             self.assertEqual(entity.url, url)
 
-    def test_removal_link_keeps_its_original_destination(self):
-        self.assertEqual(
-            app.PUBLICATION_LINKS[0],
-            ("Удалить пост", "https://t.me/m/4tffwhGJZjU8"),
-        )
+    def test_removal_link_uses_unique_bot_deep_link(self):
+        url = app.removal_deep_link(42, "abcdefghijklmnop")
+        content, entities = app.publication_content("", [], url)
+        links = [entity for entity in entities if entity.type == "text_link"]
+        self.assertEqual(entity_text(content, links[0]), "Удалить пост")
+        self.assertEqual(links[0].url, url)
+        self.assertIn("start=remove_42_abcdefghijklmnop", url)
         self.assertEqual(app.PUBLICATION_LINKS[1][0], "Предложить пост")
 
     def test_moderation_keyboards_keep_review_actions_and_announcements(self):

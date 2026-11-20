@@ -77,6 +77,24 @@ class StorageTests(unittest.TestCase):
         self.assertFalse(self.db.is_blocked(123))
         self.assertFalse(self.db.unblock_user(123))
 
+    def test_post_removal_target_and_payment_are_persistent(self):
+        sid, _ = self.db.add(
+            user_id=1, full_name="User", username=None,
+            message_id=30, album_key=None,
+        )
+        self.db.move(sid, "collecting", "published")
+        token = self.db.ensure_removal_token(sid)
+        self.db.set_publication(sid, -100123, [501, 502])
+        target = self.db.removal_target(sid, token)
+        self.assertEqual(target["published_chat_id"], "-100123")
+        self.assertEqual(target["published_message_ids"], "[501, 502]")
+        self.db.create_removal_payment("pay-1", "postrm-1-x", sid, 77, 100)
+        self.assertEqual(len(self.db.pending_removal_payments()), 1)
+        self.db.set_removal_payment_status("pay-1", "paid")
+        self.db.mark_removed(sid)
+        self.assertIsNotNone(self.db.get(sid)["removed_at"])
+        self.assertEqual(self.db.pending_removal_payments(), [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import secrets
 import sqlite3
 import time
 from pathlib import Path
@@ -30,6 +31,10 @@ class Storage:
                 reviewed_by_id INTEGER,
                 reviewed_by_name TEXT,
                 published_at TEXT,
+                removal_token TEXT,
+                published_chat_id TEXT,
+                published_message_ids TEXT NOT NULL DEFAULT '[]',
+                removed_at TEXT,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 UNIQUE(user_id, album_key)
             );
@@ -75,6 +80,18 @@ class Storage:
                 user_id INTEGER PRIMARY KEY,
                 until_ts INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS removal_payments (
+                payment_id TEXT PRIMARY KEY,
+                order_id TEXT NOT NULL UNIQUE,
+                submission_id INTEGER NOT NULL REFERENCES submissions(id),
+                buyer_user_id INTEGER NOT NULL,
+                amount_rub INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'created',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                paid_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS removal_payments_pending_idx
+                ON removal_payments(status, created_at);
         """)
 
         # Add fields when opening databases made by the earlier direct-publication version.
@@ -97,6 +114,14 @@ class Storage:
             self.conn.execute("ALTER TABLE submissions ADD COLUMN reviewed_by_name TEXT")
         if "published_at" not in columns:
             self.conn.execute("ALTER TABLE submissions ADD COLUMN published_at TEXT")
+        if "removal_token" not in columns:
+            self.conn.execute("ALTER TABLE submissions ADD COLUMN removal_token TEXT")
+        if "published_chat_id" not in columns:
+            self.conn.execute("ALTER TABLE submissions ADD COLUMN published_chat_id TEXT")
+        if "published_message_ids" not in columns:
+            self.conn.execute("ALTER TABLE submissions ADD COLUMN published_message_ids TEXT NOT NULL DEFAULT '[]'")
+        if "removed_at" not in columns:
+            self.conn.execute("ALTER TABLE submissions ADD COLUMN removed_at TEXT")
 
         item_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(items)")}
         if "moderation_message_id" not in item_columns:
@@ -290,6 +315,63 @@ class Storage:
                 (submission_id,),
             )
         )
+
+    def ensure_removal_token(self, submission_id: int) -> str:
+        row = self.get(submission_id)
+        if not row:
+            raise ValueError("Submission not found")
+        if row["removal_token"]:
+            return str(row["removal_token"])
+        token = secrets.token_urlsafe(12)
+        with self.conn:
+            self.conn.execute(
+                "UPDATE submissions SET removal_token=? WHERE id=? AND removal_token IS NULL",
+                (token, submission_id),
+            )
+        return str(self.get(submission_id)["removal_token"])
+
+    def set_publication(self, submission_id: int, chat_id: int | str, message_ids: list[int]) -> None:
+        with self.conn:
+            self.conn.execute(
+                "UPDATE submissions SET published_chat_id=?, published_message_ids=? WHERE id=?",
+                (str(chat_id), json.dumps([int(x) for x in message_ids]), submission_id),
+            )
+
+    def removal_target(self, submission_id: int, token: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM submissions WHERE id=? AND removal_token=? AND status='published'",
+            (submission_id, token),
+        ).fetchone()
+
+    def create_removal_payment(self, payment_id: str, order_id: str, submission_id: int,
+                               buyer_user_id: int, amount_rub: int) -> None:
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO removal_payments(payment_id,order_id,submission_id,buyer_user_id,amount_rub) "
+                "VALUES(?,?,?,?,?)",
+                (payment_id, order_id, submission_id, buyer_user_id, amount_rub),
+            )
+
+    def pending_removal_payments(self) -> list[sqlite3.Row]:
+        return list(self.conn.execute(
+            "SELECT p.*, s.published_chat_id, s.published_message_ids, s.removed_at "
+            "FROM removal_payments p JOIN submissions s ON s.id=p.submission_id "
+            "WHERE p.status IN ('created','processing') ORDER BY p.created_at LIMIT 50"
+        ))
+
+    def set_removal_payment_status(self, payment_id: str, status: str) -> None:
+        with self.conn:
+            self.conn.execute(
+                "UPDATE removal_payments SET status=?, paid_at=CASE WHEN ?='paid' THEN datetime('now') ELSE paid_at END "
+                "WHERE payment_id=? AND status!='paid'", (status[:32], status, payment_id)
+            )
+
+    def mark_removed(self, submission_id: int) -> None:
+        with self.conn:
+            self.conn.execute(
+                "UPDATE submissions SET removed_at=COALESCE(removed_at,datetime('now')) WHERE id=?",
+                (submission_id,),
+            )
 
     def move(
         self,

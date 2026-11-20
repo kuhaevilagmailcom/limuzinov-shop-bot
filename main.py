@@ -8,7 +8,9 @@ import logging
 import os
 import re
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiogram import Bot, Dispatcher, F, Router
@@ -34,11 +36,19 @@ from aiogram.types import (
 from dotenv import load_dotenv
 
 from storage import Storage
+from payments import RollyPayError, create_payment, get_payment
 
 ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 DB_PATH = os.getenv("DB_PATH", str(ROOT / "suggestions.sqlite3"))
+ROLLYPAY_API_BASE = os.getenv("ROLLYPAY_API_BASE", "https://rollypay.io").rstrip("/")
+ROLLYPAY_API_KEY = os.getenv("ROLLYPAY_API_KEY", "").strip()
+ROLLYPAY_TERMINAL_ID = os.getenv("ROLLYPAY_TERMINAL_ID", "").strip()
+ROLLYPAY_TEST_MODE = os.getenv("ROLLYPAY_TEST_MODE", "false").strip().lower() in {"1", "true", "yes", "on"}
+PUBLIC_SITE_BASE_URL = os.getenv("PUBLIC_SITE_BASE_URL", "https://mgnvpn.ru").rstrip("/")
+PUBLIC_BOT_USERNAME = os.getenv("PUBLIC_BOT_USERNAME", "PozorMgnBot").strip().lstrip("@")
+DEFAULT_REMOVAL_PRICE_RUB = 100
 
 # Known moderation group ID from the existing deployment. Publication must be configured separately.
 REQUESTED_DEFAULT_CHAT_ID = "-5106639548"
@@ -63,7 +73,7 @@ PUBLICATION_DISCLAIMER = (
 )
 
 PUBLICATION_LINKS = (
-    ("Удалить пост", "https://t.me/m/4tffwhGJZjU8"),
+    ("Удалить пост", "https://t.me/PozorMgnBot?start=remove_unavailable"),
     ("Предложить пост", "https://t.me/PozorMgnBot"),
 )
 CHANNEL_PROMOS = {
@@ -746,6 +756,7 @@ def utf16_length(value: str) -> int:
 def publication_content(
     original: str,
     original_entities: list[MessageEntity],
+    removal_url: str | None = None,
 ) -> tuple[str, list[MessageEntity]]:
     """Preserve source formatting; append quoted disclaimer and two clickable text links."""
     separator = "\n\n" if original else ""
@@ -759,7 +770,8 @@ def publication_content(
         )
     )
     content += "\n\n"
-    for index, (label, url) in enumerate(PUBLICATION_LINKS):
+    links = ((PUBLICATION_LINKS[0][0], removal_url or PUBLICATION_LINKS[0][1]), PUBLICATION_LINKS[1])
+    for index, (label, url) in enumerate(links):
         if index:
             content += "\n"
         offset = utf16_length(content)
@@ -780,7 +792,8 @@ async def add_publication_disclaimer(
     destination: int | str,
     copied_ids: list[int],
     items,
-) -> None:
+    removal_url: str,
+) -> int | None:
     """Append attribution links beneath each publication, with reply fallback for unsupported types."""
     caption_types = {"photo", "video", "animation", "document", "audio", "voice"}
     candidates = [
@@ -796,7 +809,7 @@ async def add_publication_disclaimer(
     for index, item in candidates:
         content_type = str(item["content_type"] or "")
         combined, entities = publication_content(
-            str(item["content_text"] or ""), stored_entities(item)
+            str(item["content_text"] or ""), stored_entities(item), removal_url
         )
         limit = 4096 if content_type == "text" else 1024
         if utf16_length(combined) > limit:
@@ -819,7 +832,7 @@ async def add_publication_disclaimer(
                     caption_entities=entities,
                     parse_mode=None,
                 )
-            return
+            return None
         except TelegramAPIError as exc:
             logger.warning(
                 "Could not append publication footer to message %s: %s",
@@ -829,9 +842,9 @@ async def add_publication_disclaimer(
 
     # Sticker, video note, oversized captions and non-editable content use a reply.
     # No original submission content is discarded to make room for the footer.
-    footer, entities = publication_content("", [])
+    footer, entities = publication_content("", [], removal_url)
     try:
-        await bot.send_message(
+        sent = await bot.send_message(
             chat_id=destination,
             text=footer,
             entities=entities,
@@ -841,18 +854,20 @@ async def add_publication_disclaimer(
                 allow_sending_without_reply=True,
             ),
         )
+        return sent.message_id
     except TelegramAPIError as exc:
         logger.warning(
             "Could not attach footer as a reply to post %s; publishing separately: %s",
             copied_ids[0],
             exc,
         )
-        await bot.send_message(
+        sent = await bot.send_message(
             chat_id=destination,
             text=footer,
             entities=entities,
             parse_mode=None,
         )
+        return sent.message_id
 
 async def copy_submission(
     bot: Bot,
@@ -1036,6 +1051,7 @@ async def configure_commands(bot: Bot) -> None:
                     BotCommand(command="done", description="Рассылка пользователям"),
                     BotCommand(command="users", description="Список пользователей"),
                     BotCommand(command="unblock", description="Разблокировать пользователя"),
+                    BotCommand(command="setdeleteprice", description="Цена удаления поста"),
                     BotCommand(command="cleanbuttons", description="Убрать старые кнопки с сообщения"),
                 ],
                 scope=BotCommandScopeChat(chat_id=moderation_id),
@@ -1202,6 +1218,129 @@ async def deliver_group_reply(bot: Bot, message: Message, session: dict[str, obj
         )
     )
 
+def removal_price_rub() -> int:
+    raw = db.get_setting("post_removal_price_rub") or os.getenv(
+        "POST_REMOVAL_PRICE_RUB", str(DEFAULT_REMOVAL_PRICE_RUB)
+    )
+    try:
+        return max(1, min(100000, int(raw)))
+    except (TypeError, ValueError):
+        return DEFAULT_REMOVAL_PRICE_RUB
+
+
+def removal_deep_link(submission_id: int, token: str) -> str:
+    return f"https://t.me/{PUBLIC_BOT_USERNAME}?start=remove_{submission_id}_{token}"
+
+
+def published_message_ids(sub) -> list[int]:
+    try:
+        values = json.loads(str(sub["published_message_ids"] or "[]"))
+        return [int(value) for value in values]
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+
+
+async def start_removal_payment(message: Message, submission_id: int, token: str) -> None:
+    sub = db.removal_target(submission_id, token)
+    if not sub or sub["removed_at"]:
+        await message.answer("Этот пост уже удалён или ссылка больше не действует.")
+        return
+    message_ids = published_message_ids(sub)
+    if not sub["published_chat_id"] or not message_ids:
+        await message.answer("Не удалось найти опубликованный пост. Напиши администратору.")
+        return
+    if not ROLLYPAY_API_KEY:
+        await message.answer("Оплата удаления пока не настроена. Администратору нужно добавить ключ RollyPay.")
+        return
+
+    amount = removal_price_rub()
+    order_id = f"postrm-{submission_id}-{uuid4().hex[:16]}"
+    metadata = {
+        "action": "post_removal",
+        "submission_id": str(submission_id),
+        "chat_id": str(sub["published_chat_id"]),
+        "message_ids": message_ids,
+        "buyer_user_id": str(message.from_user.id),
+    }
+    try:
+        payment = await create_payment(
+            api_base=ROLLYPAY_API_BASE, api_key=ROLLYPAY_API_KEY,
+            terminal_id=ROLLYPAY_TERMINAL_ID, order_id=order_id,
+            amount=Decimal(amount), description=f"Удаление поста #{submission_id}",
+            customer_id=str(message.from_user.id), metadata=metadata,
+            test=ROLLYPAY_TEST_MODE,
+            success_url=f"{PUBLIC_SITE_BASE_URL}/payments/post-removal/success",
+            fail_url=f"{PUBLIC_SITE_BASE_URL}/payments/post-removal/fail",
+        )
+        db.create_removal_payment(
+            str(payment["payment_id"]), order_id, submission_id,
+            message.from_user.id, amount,
+        )
+    except (RollyPayError, KeyError, ValueError) as exc:
+        logger.warning("Could not create post removal payment: %s", exc)
+        await message.answer("Не удалось создать оплату. Попробуй ещё раз через минуту.")
+        return
+
+    await message.answer(
+        f"<b>Удаление поста #{submission_id}</b>\n\n"
+        f"Стоимость: <b>{amount} ₽</b>. После подтверждения оплаты пост удалится автоматически.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text=f"Оплатить {amount} ₽", url=str(payment["pay_url"]))
+        ]]),
+    )
+
+
+async def delete_published_submission(bot: Bot, sub, message_ids: list[int]) -> bool:
+    chat_id = parse_chat_id(sub["published_chat_id"])
+    if chat_id is None or not message_ids:
+        return False
+    for message_id in message_ids:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=message_id)
+        except TelegramBadRequest as exc:
+            text = str(exc).lower()
+            if "message to delete not found" not in text and "message identifier is not specified" not in text:
+                logger.warning("Could not delete paid post message %s: %s", message_id, exc)
+                return False
+        except TelegramAPIError as exc:
+            logger.warning("Could not delete paid post message %s: %s", message_id, exc)
+            return False
+    return True
+
+
+async def reconcile_removal_payments(bot: Bot) -> None:
+    while True:
+        if ROLLYPAY_API_KEY:
+            for payment in db.pending_removal_payments():
+                try:
+                    remote = await get_payment(
+                        api_base=ROLLYPAY_API_BASE, api_key=ROLLYPAY_API_KEY,
+                        payment_id=str(payment["payment_id"]),
+                    )
+                    status = str(remote.get("status") or "").lower()
+                    if status == "paid":
+                        currency = str(remote.get("currency") or remote.get("payment_currency") or "").upper()
+                        amount = Decimal(str(remote.get("amount")))
+                        if (
+                            str(remote.get("payment_id")) != str(payment["payment_id"])
+                            or str(remote.get("order_id")) != str(payment["order_id"])
+                            or currency != "RUB"
+                            or amount != Decimal(int(payment["amount_rub"]))
+                        ):
+                            logger.error("Paid removal payment failed exact validation: %s", payment["payment_id"])
+                            continue
+                        if await delete_published_submission(bot, payment, published_message_ids(payment)):
+                            db.mark_removed(int(payment["submission_id"]))
+                            db.set_removal_payment_status(str(payment["payment_id"]), "paid")
+                            await safe_notify(bot, int(payment["buyer_user_id"]), f"{ce('check')} Оплата подтверждена. Пост удалён.")
+                    elif status in {"expired", "canceled", "cancelled", "failed", "processing"}:
+                        db.set_removal_payment_status(str(payment["payment_id"]), status)
+                except (RollyPayError, InvalidOperation, TypeError, ValueError) as exc:
+                    logger.debug("Removal payment reconciliation failed: %s", exc)
+                await asyncio.sleep(0.05)
+        await asyncio.sleep(12)
+
+
 @router.message(CommandStart(), F.chat.type == "private")
 async def start(message: Message, bot: Bot) -> None:
     if not message.from_user:
@@ -1212,6 +1351,12 @@ async def start(message: Message, bot: Bot) -> None:
             message.from_user.username,
             message.from_user.full_name,
         )
+    payload = (message.text or "").split(maxsplit=1)
+    if len(payload) == 2:
+        match = re.fullmatch(r"remove_(\d+)_([A-Za-z0-9_-]{12,40})", payload[1].strip())
+        if match:
+            await start_removal_payment(message, int(match.group(1)), match.group(2))
+            return
     if await is_blocked_from_suggestions(bot, message.from_user.id):
         await safe_answer(
             message,
@@ -1254,6 +1399,7 @@ async def help_command(message: Message, bot: Bot) -> None:
         "/done ТЕКСТ — рассылка всем пользователям; также можно ответить командой /done на сообщение "
         "и разослать его (после подтверждения)\n"
         "/unblock USER_ID — снять блокировку\n"
+        "/setdeleteprice СУММА — изменить цену удаления поста в рублях\n"
         "/cleanbuttons — убрать кнопки с сообщения, на которое ответили; "
         "/cleanbuttons POST_ID — убрать кнопки в канале\n"
         "/help — список команд",
@@ -1388,6 +1534,26 @@ async def top_command(message: Message, bot: Bot) -> None:
         f"За месяц: <b>{published['month']}</b>"
     )
     await message.answer("🏆 <b>Топ модераторов</b>\n\n" + "\n\n".join(lines))
+
+
+@router.message(Command("setdeleteprice"))
+async def set_delete_price_command(message: Message, bot: Bot) -> None:
+    if not message.from_user or not await is_moderation_admin(bot, message.from_user.id):
+        await message.answer("Команда доступна только администраторам группы модерации.")
+        return
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) != 2 or not parts[1].strip().isdigit():
+        await message.answer(
+            f"Текущая цена: <b>{removal_price_rub()} ₽</b>\n"
+            "Чтобы изменить: <code>/setdeleteprice 150</code>"
+        )
+        return
+    amount = int(parts[1].strip())
+    if amount < 1 or amount > 100000:
+        await message.answer("Цена должна быть от 1 до 100000 рублей.")
+        return
+    db.set_setting("post_removal_price_rub", str(amount))
+    await message.answer(f"{ce('check')} Цена удаления поста изменена: <b>{amount} ₽</b>.")
 
 
 @router.message(Command("unblock"), F.chat.type.in_({"group", "supergroup"}))
@@ -2083,6 +2249,13 @@ async def moderate(callback: CallbackQuery, bot: Bot) -> None:
         try:
             # Publish the original submission and append the quoted disclaimer.
             copied_ids, _ = await copy_submission(bot, target, sub_id)
+            removal_token = db.ensure_removal_token(sub_id)
+            footer_id = await add_publication_disclaimer(
+                bot, target, copied_ids, db.items_for_submission(sub_id),
+                removal_deep_link(sub_id, removal_token),
+            )
+            published_ids = copied_ids + ([footer_id] if footer_id else [])
+            db.set_publication(sub_id, target, published_ids)
         except (TelegramAPIError, ValueError) as exc:
             db.move(sub_id, "publishing", "publish_uncertain")
             logger.exception("Publication status uncertain for %s: %s", sub_id, exc)
@@ -2312,10 +2485,13 @@ async def main() -> None:
         )
         await cleanup_processed_inline_keyboards(bot)
         recovery_job = asyncio.create_task(recover(bot))
+        removal_reconcile_job = asyncio.create_task(reconcile_removal_payments(bot))
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
         if "recovery_job" in locals():
             recovery_job.cancel()
+        if "removal_reconcile_job" in locals():
+            removal_reconcile_job.cancel()
         for job in album_jobs.values():
             job.cancel()
         for job in reply_jobs.values():
