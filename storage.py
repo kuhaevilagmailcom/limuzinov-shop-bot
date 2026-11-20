@@ -6,6 +6,7 @@ import json
 import secrets
 import sqlite3
 import time
+from contextlib import closing
 from pathlib import Path
 
 
@@ -31,8 +32,8 @@ def resolve_database_path(
     if (not target.exists() or target.stat().st_size == 0) and (
         legacy.is_file() and legacy.stat().st_size > 0
     ):
-        with sqlite3.connect(str(legacy)) as source:
-            with sqlite3.connect(str(target)) as destination:
+        with closing(sqlite3.connect(str(legacy))) as source:
+            with closing(sqlite3.connect(str(target))) as destination:
                 source.backup(destination)
 
     return str(target)
