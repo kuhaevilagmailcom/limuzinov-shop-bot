@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from storage import Storage
+from storage import Storage, resolve_database_path
 
 
 class StorageTests(unittest.TestCase):
@@ -94,6 +94,79 @@ class StorageTests(unittest.TestCase):
         self.db.mark_removed(sid)
         self.assertIsNotNone(self.db.get(sid)["removed_at"])
         self.assertEqual(self.db.pending_removal_payments(), [])
+
+
+    def test_unpaid_published_post_remains_payable_after_reopen(self):
+        sid, _ = self.db.add(
+            user_id=19, full_name="Poster", username=None, message_id=88,
+            album_key=None, quote_text="Persistent post",
+        )
+        self.db.move(sid, "collecting", "publishing")
+        token = self.db.ensure_removal_token(sid)
+        self.db.set_publication(sid, "-100987", [801, 802])
+        self.db.move(sid, "publishing", "published")
+
+        self.assertIsNotNone(self.db.removal_target(sid, token))
+        self.db.close()
+        self.db = Storage(str(Path(self.tmp.name) / "test.sqlite3"))
+        self.assertIsNotNone(self.db.removal_target(sid, token))
+        self.assertIsNone(self.db.removal_target(sid, "wrong-token"))
+        # A pending or abandoned payment does not invalidate the post's link.
+        self.db.create_removal_payment("pay-pending", "postrm-99-abc", sid, 55, 100)
+        self.assertIsNotNone(self.db.removal_target(sid, token))
+
+    def test_removal_link_still_valid_when_publication_state_is_uncertain(self):
+        sid, _ = self.db.add(
+            user_id=19, full_name="Poster", username=None, message_id=90,
+            album_key=None,
+        )
+        self.db.move(sid, "collecting", "publishing")
+        token = self.db.ensure_removal_token(sid)
+        self.db.set_publication(sid, "-100987", [900])
+        self.db.move(sid, "publishing", "publish_uncertain")
+        self.assertIsNotNone(self.db.removal_target(sid, token))
+
+
+class PersistentDatabasePathTests(unittest.TestCase):
+    def test_migrates_existing_legacy_database_to_persistent_data_dir(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            old = root / "suggestions.sqlite3"
+            original = Storage(str(old))
+            sid, _ = original.add(
+                user_id=100, full_name="Poster", username=None,
+                message_id=400, album_key=None,
+            )
+            original.move(sid, "collecting", "published")
+            token = original.ensure_removal_token(sid)
+            original.set_publication(sid, -100123, [700])
+            original.close()
+
+            persistent = root / "data"
+            path = resolve_database_path(root, data_dir=str(persistent))
+            self.assertEqual(path, str(persistent / "suggestions.sqlite3"))
+            restored = Storage(path)
+            self.assertIsNotNone(restored.removal_target(sid, token))
+            restored.close()
+
+            # A second startup uses the persistent database, not a stale legacy copy.
+            path_again = resolve_database_path(root, data_dir=str(persistent))
+            self.assertEqual(path_again, path)
+            reopened = Storage(path_again)
+            self.assertIsNotNone(reopened.removal_target(sid, token))
+            reopened.close()
+
+    def test_explicit_database_path_remains_authoritative(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            configured = str(root / "custom.sqlite3")
+            self.assertEqual(
+                resolve_database_path(
+                    root, configured_path=configured, data_dir=str(root / "data")
+                ),
+                configured,
+            )
+
 
 
 if __name__ == "__main__":
