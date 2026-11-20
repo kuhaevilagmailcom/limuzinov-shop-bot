@@ -125,6 +125,19 @@ class Storage:
             );
             CREATE INDEX IF NOT EXISTS removal_payments_pending_idx
                 ON removal_payments(status, created_at);
+            CREATE TABLE IF NOT EXISTS legacy_post_removal_payments (
+                payment_id TEXT PRIMARY KEY,
+                order_id TEXT UNIQUE NOT NULL,
+                buyer_user_id INTEGER NOT NULL,
+                chat_id TEXT NOT NULL,
+                message_ids_json TEXT NOT NULL,
+                amount_rub INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'created',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                paid_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS legacy_post_removal_pending_idx
+                ON legacy_post_removal_payments(status, created_at);
             CREATE TABLE IF NOT EXISTS post_action_sessions (
                 user_id INTEGER PRIMARY KEY,
                 action TEXT NOT NULL,
@@ -417,6 +430,39 @@ class Storage:
             self.conn.execute(
                 "UPDATE removal_payments SET status=?, paid_at=CASE WHEN ?='paid' THEN datetime('now') ELSE paid_at END "
                 "WHERE payment_id=? AND status!='paid'", (status[:32], status, payment_id)
+            )
+
+    def create_legacy_removal_payment(
+        self, payment_id: str, order_id: str, buyer_user_id: int,
+        chat_id: int, message_ids: list[int], amount_rub: int,
+    ) -> None:
+        if not message_ids or any(int(mid) <= 0 for mid in message_ids):
+            raise ValueError("Post messages must be verified before invoicing")
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO legacy_post_removal_payments("
+                "payment_id,order_id,buyer_user_id,chat_id,message_ids_json,amount_rub"
+                ") VALUES(?,?,?,?,?,?)",
+                (
+                    payment_id, order_id, int(buyer_user_id), str(chat_id),
+                    json.dumps(sorted(set(int(mid) for mid in message_ids))),
+                    int(amount_rub),
+                ),
+            )
+
+    def pending_legacy_removal_payments(self) -> list[sqlite3.Row]:
+        return list(self.conn.execute(
+            "SELECT * FROM legacy_post_removal_payments "
+            "WHERE status IN ('created','processing') ORDER BY created_at LIMIT 50"
+        ))
+
+    def mark_legacy_removal_payment(self, payment_id: str, status: str) -> None:
+        with self.conn:
+            self.conn.execute(
+                "UPDATE legacy_post_removal_payments SET status=?, "
+                "paid_at=CASE WHEN ?='paid' THEN datetime('now') ELSE paid_at END "
+                "WHERE payment_id=? AND status!='paid'",
+                (status[:32], status, payment_id),
             )
 
     def author_disclosure_enabled(self, user_id: int) -> bool:
