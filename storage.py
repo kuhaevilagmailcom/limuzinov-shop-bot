@@ -839,6 +839,10 @@ class Storage:
     def active_giveaway(self) -> sqlite3.Row | None:
         return self.conn.execute("SELECT * FROM giveaways WHERE status='active' ORDER BY id DESC LIMIT 1").fetchone()
 
+    def set_active_giveaway_price(self, price: int) -> None:
+        with self.conn:
+            self.conn.execute("UPDATE giveaways SET ticket_price_rub=? WHERE status='active'", (price,))
+
     def create_giveaway_ticket(self, payment_id: str, order_id: str, giveaway_id: int, user_id: int, amount: int, quantity: int = 1) -> None:
         with self.conn:
             self.conn.execute("INSERT INTO giveaway_tickets(payment_id,giveaway_id,user_id,order_id,amount_rub,quantity) VALUES(?,?,?,?,?,?)", (payment_id, giveaway_id, user_id, order_id, amount, quantity))

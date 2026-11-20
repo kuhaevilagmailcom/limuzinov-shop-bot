@@ -1077,16 +1077,7 @@ async def configure_commands(bot: Bot) -> None:
         try:
             await bot.set_my_commands(
                 [
-                    BotCommand(command="help", description="Список команд"),
-                    BotCommand(command="top", description="Топ модераторов"),
-                    BotCommand(command="done", description="Рассылка пользователям"),
-                    BotCommand(command="users", description="Список пользователей"),
-                    BotCommand(command="unblock", description="Разблокировать пользователя"),
-                    BotCommand(command="setdeleteprice", description="Цена удаления поста"),
-                    BotCommand(command="setinfoprice", description="Цена сведений об авторе"),
-                    BotCommand(command="invoice", description="Создать счёт пользователю"),
                     BotCommand(command="admin", description="Админ-меню"),
-                    BotCommand(command="cleanbuttons", description="Убрать старые кнопки с сообщения"),
                 ],
                 scope=BotCommandScopeChat(chat_id=moderation_id),
             )
@@ -1553,10 +1544,35 @@ async def start(message: Message, bot: Bot) -> None:
     admin_mode = admin_sessions.get(sender_id)
     if admin_mode and await is_moderation_admin(bot, sender_id):
         value = (message.text or "").strip()
+        if admin_mode == "invoice":
+            parts = value.split(maxsplit=1)
+            if len(parts) != 2 or not parts[0].isdigit() or not 1 <= int(parts[0]) <= 100000:
+                await message.answer("Формат: <code>500 Оплата услуги</code>"); return
+            if not ROLLYPAY_API_KEY or not ROLLYPAY_TERMINAL_ID:
+                await message.answer("Оплата RollyPay пока не настроена."); return
+            amount, description = int(parts[0]), parts[1]
+            order_id = f"invoice-{uuid4().hex[:18]}"
+            try:
+                payment = await create_payment(api_base=ROLLYPAY_API_BASE, api_key=ROLLYPAY_API_KEY, terminal_id=ROLLYPAY_TERMINAL_ID, order_id=order_id, amount=Decimal(amount), description=description, customer_id=str(sender_id), metadata={"action":"invoice","buyer_user_id":str(sender_id),"created_by":str(sender_id)}, test=ROLLYPAY_TEST_MODE, success_url=f"https://t.me/{PUBLIC_BOT_USERNAME}", fail_url=f"https://t.me/{PUBLIC_BOT_USERNAME}")
+                db.create_invoice(str(payment['payment_id']), order_id, sender_id, sender_id, amount, description)
+            except (RollyPayError, KeyError, ValueError):
+                await message.answer("Не удалось создать счёт."); return
+            admin_sessions.pop(sender_id, None)
+            await message.answer(f"<b>Счёт на оплату</b>\n{html.escape(description)}\nСумма: <b>{amount} ₽</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Открыть оплату", url=str(payment['pay_url']))]])); return
+        if admin_mode == "service_price":
+            parts = value.casefold().split()
+            if len(parts) != 2 or not parts[1].isdigit() or not 1 <= int(parts[1]) <= 100000:
+                await message.answer("Формат: <code>удаление 100</code> или <code>автор 100</code>"); return
+            if parts[0] in {"удаление", "delete"}: key, label = "post_removal_price_rub", "удаления"
+            elif parts[0] in {"автор", "author"}: key, label = "post_author_info_price_rub", "сведений об авторе"
+            else: await message.answer("Укажи «удаление» или «автор»."); return
+            db.set_setting(key, parts[1]); admin_sessions.pop(sender_id, None)
+            await message.answer(f"Цена {label}: <b>{parts[1]} ₽</b>."); return
         if admin_mode == "ticket_price":
             if not value.isdigit() or not 1 <= int(value) <= 100000:
                 await message.answer("Пришли цену целым числом от 1 до 100000."); return
             db.set_setting("giveaway_ticket_price_rub", value)
+            db.set_active_giveaway_price(int(value))
             admin_sessions.pop(sender_id, None)
             await message.answer(f"Цена билета: <b>{value} ₽</b>."); return
         if admin_mode == "giveaway_title":
@@ -1690,6 +1706,8 @@ def admin_menu_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🎁 Создать розыгрыш", callback_data="gadmin:create"), InlineKeyboardButton(text="🎟 Цена билета", callback_data="gadmin:price")],
         [InlineKeyboardButton(text="📢 Опубликовать в канал", callback_data="gadmin:publish"), InlineKeyboardButton(text="📨 Разослать", callback_data="gadmin:broadcast")],
         [InlineKeyboardButton(text="📊 Статистика", callback_data="gadmin:stats"), InlineKeyboardButton(text="🏆 Подвести итоги", callback_data="gadmin:draw")],
+        [InlineKeyboardButton(text="💳 Создать счёт", callback_data="gadmin:invoice"), InlineKeyboardButton(text="💸 Цены услуг", callback_data="gadmin:prices")],
+        [InlineKeyboardButton(text="👥 Пользователи", callback_data="gadmin:users"), InlineKeyboardButton(text="📈 Топ модераторов", callback_data="gadmin:top")],
     ])
 
 
@@ -1712,6 +1730,23 @@ async def giveaway_admin_callback(callback: CallbackQuery, bot: Bot) -> None:
     if action == "price":
         admin_sessions[callback.from_user.id] = "ticket_price"; await callback.answer()
         await callback.message.answer(f"Текущая цена: <b>{ticket_price_rub()} ₽</b>\nПришли новую цену числом."); return
+    if action == "invoice":
+        admin_sessions[callback.from_user.id] = "invoice"; await callback.answer()
+        await callback.message.answer("Пришли сумму и описание через пробел.\nПример: <code>500 Оплата услуги</code>"); return
+    if action == "prices":
+        await callback.answer()
+        await callback.message.answer(
+            f"<b>Цены услуг</b>\nУдаление: <b>{removal_price_rub()} ₽</b>\nАвтор: <b>{author_info_price_rub()} ₽</b>\n\n"
+            "Пришли: <code>удаление 100</code> или <code>автор 100</code>."
+        )
+        admin_sessions[callback.from_user.id] = "service_price"; return
+    if action == "users":
+        total = db.user_count(); await callback.answer()
+        await callback.message.answer(render_users_page(0), reply_markup=users_page_keyboard(0, total)); return
+    if action == "top":
+        rows = db.moderator_top(10); await callback.answer()
+        lines = [f"{index}. <b>{html.escape(str(row['reviewed_by_name'] or 'Модератор'))}</b> · <b>{int(row['total'] or 0)}</b>" for index, row in enumerate(rows, 1)]
+        await callback.message.answer("<b>Топ модераторов</b>\n" + ("\n".join(lines) or "Пока нет данных.")); return
     if not active:
         await callback.answer("Сначала создай розыгрыш.", show_alert=True); return
     giveaway_id = int(active['id'])
@@ -1762,6 +1797,7 @@ async def set_ticket_price_command(message: Message, bot: Bot) -> None:
     if len(value) != 2 or not value[1].isdigit() or not 1 <= int(value[1]) <= 100000:
         await message.answer(f"Текущая цена билета: <b>{ticket_price_rub()} ₽</b>\nПример: <code>/setticketprice 100</code>"); return
     db.set_setting("giveaway_ticket_price_rub", value[1])
+    db.set_active_giveaway_price(int(value[1]))
     await message.answer(f"Цена билета: <b>{value[1]} ₽</b>.")
 
 
