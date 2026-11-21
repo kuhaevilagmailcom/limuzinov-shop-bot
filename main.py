@@ -111,7 +111,7 @@ album_jobs: dict[tuple[int, str], asyncio.Task] = {}
 reply_sessions: dict[int, dict[str, object]] = {}
 reply_jobs: dict[int, asyncio.Task] = {}
 broadcast_sessions: dict[int, dict[str, object]] = {}
-admin_sessions: dict[int, tuple[str, int]] = {}
+admin_sessions: dict[int, tuple[object, ...]] = {}
 USERS_PAGE_SIZE = 10
 resolved_destination_chat_id: int | None = None
 resolved_moderation_chat_id: int | None = None
@@ -1517,6 +1517,16 @@ async def reconcile_removal_payments(bot: Bot) -> None:
                     if status == 'paid' and str(remote.get('order_id')) == str(ticket['order_id']) and Decimal(str(remote.get('amount'))) == Decimal(int(ticket['amount_rub'])) and str(remote.get('currency') or remote.get('payment_currency') or '').upper() == 'RUB':
                         db.set_giveaway_ticket_status(str(ticket['payment_id']), 'paid')
                         await safe_notify(bot, int(ticket['user_id']), f"Оплата подтверждена. Билет в розыгрыш «{html.escape(str(ticket['title']))}» получен.")
+                        username = f"@{html.escape(str(ticket['username']))}" if ticket['username'] else "без username"
+                        full_name = html.escape(str(ticket['full_name'] or 'Пользователь'))
+                        await safe_bot_send_message(
+                            bot, moderation_chat_id(),
+                            f"✅ <b>Новая оплата за билеты</b>\n\n"
+                            f"🎁 {html.escape(str(ticket['title']))}\n"
+                            f"👤 {full_name} · {username}\n"
+                            f"🆔 <code>{ticket['user_id']}</code>\n"
+                            f"🎟 Билетов: <b>{ticket['quantity']}</b> · <b>{ticket['amount_rub']} ₽</b>",
+                        )
                     elif status in {'expired', 'canceled', 'cancelled', 'failed'}: db.set_giveaway_ticket_status(str(ticket['payment_id']), status)
                 except (RollyPayError, InvalidOperation, TypeError, ValueError) as exc: logger.warning('Ticket reconciliation failed: %s', exc)
             for invoice in db.pending_invoices():
@@ -1527,8 +1537,32 @@ async def reconcile_removal_payments(bot: Bot) -> None:
                         db.set_invoice_status(str(invoice['payment_id']), 'paid')
                         await safe_notify(bot, int(invoice['buyer_user_id']), 'Оплата по счёту подтверждена.')
                         await safe_notify(bot, int(invoice['created_by_id']), f"Счёт для <code>{invoice['buyer_user_id']}</code> оплачен.")
+                        username = f"@{html.escape(str(invoice['username']))}" if invoice['username'] else "без username"
+                        full_name = html.escape(str(invoice['full_name'] or 'Пользователь'))
+                        await safe_bot_send_message(
+                            bot, moderation_chat_id(),
+                            f"✅ <b>Новая оплата по счёту</b>\n\n"
+                            f"👤 {full_name} · {username}\n"
+                            f"🆔 <code>{invoice['buyer_user_id']}</code>\n"
+                            f"💳 {html.escape(str(invoice['description']))} · <b>{invoice['amount_rub']} ₽</b>",
+                        )
                     elif status in {'expired', 'canceled', 'cancelled', 'failed'}: db.set_invoice_status(str(invoice['payment_id']), status)
                 except (RollyPayError, InvalidOperation, TypeError, ValueError) as exc: logger.warning('Invoice reconciliation failed: %s', exc)
+            for giveaway in db.due_giveaways(datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")):
+                giveaway_id = int(giveaway['id'])
+                winner = db.draw_giveaway(giveaway_id)
+                final = db.giveaway(giveaway_id)
+                winner_text = f"<code>{winner}</code>" if winner else "нет оплаченных билетов"
+                result = f"🏁 <b>Розыгрыш #{giveaway_id} завершён</b>\n{html.escape(str(giveaway['title']))}\n\nПобедитель: {winner_text}"
+                await safe_bot_send_message(bot, moderation_chat_id(), result)
+                channel_id, channel_message_id = final['channel_chat_id'], final['channel_message_id']
+                if channel_id and channel_message_id:
+                    try:
+                        await bot.edit_message_text(
+                            chat_id=channel_id, message_id=int(channel_message_id), text=result, reply_markup=None,
+                        )
+                    except TelegramAPIError as exc:
+                        logger.warning("Could not close giveaway card %s: %s", giveaway_id, exc)
         await asyncio.sleep(12)
 
 async def consume_admin_session(message: Message, bot: Bot) -> bool:
@@ -1538,14 +1572,15 @@ async def consume_admin_session(message: Message, bot: Bot) -> bool:
     sender_id = message.from_user.id
     session = admin_sessions.get(sender_id)
     message_chat_id = getattr(getattr(message, "chat", None), "id", None)
-    if not session or session[1] != message_chat_id:
+    if not session or len(session) < 2 or session[1] != message_chat_id:
         return False
     if not await is_moderation_admin(bot, sender_id):
         admin_sessions.pop(sender_id, None)
         await message.answer("Команда доступна только администратору.")
         return True
 
-    admin_mode = session[0]
+    admin_mode = str(session[0])
+    session_data = session[2] if len(session) > 2 and isinstance(session[2], dict) else {}
     if admin_mode:
         value = (message.text or "").strip()
         if admin_mode == "invoice":
@@ -1582,7 +1617,28 @@ async def consume_admin_session(message: Message, bot: Bot) -> bool:
         if admin_mode == "giveaway_title":
             if not value or len(value) > 180:
                 await message.answer("Пришли название приза до 180 символов."); return True
-            giveaway_id = db.create_giveaway(value, ticket_price_rub(), sender_id, message.chat.id)
+            admin_sessions[sender_id] = ("giveaway_price", message.chat.id, {"title": value})
+            await message.answer(
+                "Укажи цену одного билета в рублях.",
+                reply_markup=ForceReply(force_reply=True, selective=True),
+            )
+            return True
+        if admin_mode == "giveaway_price":
+            if not value.isdigit() or not 1 <= int(value) <= 100000:
+                await message.answer("Цена — целое число от 1 до 100000."); return True
+            admin_sessions[sender_id] = ("giveaway_ends_at", message.chat.id, {**session_data, "price": int(value)})
+            await message.answer(
+                "Укажи окончание: <code>24ч</code>, <code>7д</code> или дату <code>25.11.2026 21:00</code>.",
+                reply_markup=ForceReply(force_reply=True, selective=True),
+            )
+            return True
+        if admin_mode == "giveaway_ends_at":
+            ends_at = parse_giveaway_end(value)
+            if not ends_at:
+                await message.answer("Не понял дату. Пример: <code>24ч</code>, <code>7д</code> или <code>25.11.2026 21:00</code>."); return True
+            giveaway_id = db.create_giveaway(
+                str(session_data["title"]), int(session_data["price"]), sender_id, message.chat.id, ends_at,
+            )
             admin_sessions.pop(sender_id, None)
             card = await message.answer(giveaway_card(giveaway_id), reply_markup=giveaway_keyboard(giveaway_id))
             db.set_giveaway_message(giveaway_id, card.message_id)
@@ -1700,9 +1756,45 @@ def ticket_price_rub() -> int:
     except (TypeError, ValueError): return 100
 
 
+def giveaway_timezone() -> ZoneInfo | timezone:
+    try:
+        return ZoneInfo(TIMEZONE)
+    except (ZoneInfoNotFoundError, ValueError):
+        return timezone.utc
+
+
+def parse_giveaway_end(value: str) -> str | None:
+    """Convert an admin's duration/date into a UTC SQLite timestamp."""
+    raw = value.strip().casefold()
+    match = re.fullmatch(r"(\d{1,3})\s*(ч|час(?:а|ов)?|h|д|дн(?:я|ей)?|d)", raw)
+    if match:
+        count, unit = int(match.group(1)), match.group(2)
+        if not 1 <= count <= 365:
+            return None
+        delta = timedelta(hours=count) if unit.startswith(("ч", "h")) else timedelta(days=count)
+        return (datetime.now(timezone.utc) + delta).strftime("%Y-%m-%d %H:%M:%S")
+    for pattern in ("%d.%m.%Y %H:%M", "%d.%m %H:%M"):
+        try:
+            parsed = datetime.strptime(value.strip(), pattern)
+            if pattern == "%d.%m %H:%M":
+                parsed = parsed.replace(year=datetime.now(giveaway_timezone()).year)
+            local = parsed.replace(tzinfo=giveaway_timezone())
+            if local <= datetime.now(giveaway_timezone()):
+                return None
+            return local.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            continue
+    return None
+
+
+def giveaway_end_text(giveaway) -> str:
+    return sent_at(str(giveaway["ends_at"])) if giveaway["ends_at"] else "не задано"
+
+
 def giveaway_keyboard(giveaway_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Купить 1 билет", callback_data=f"giveaway:buy:{giveaway_id}:1"), InlineKeyboardButton(text="5 билетов", callback_data=f"giveaway:buy:{giveaway_id}:5")],
+        [InlineKeyboardButton(text="1 билет", callback_data=f"giveaway:buy:{giveaway_id}:1"), InlineKeyboardButton(text="3 билета", callback_data=f"giveaway:buy:{giveaway_id}:3")],
+        [InlineKeyboardButton(text="5 билетов", callback_data=f"giveaway:buy:{giveaway_id}:5"), InlineKeyboardButton(text="10 билетов", callback_data=f"giveaway:buy:{giveaway_id}:10")],
         [InlineKeyboardButton(text="Мои билеты", callback_data=f"giveaway:mine:{giveaway_id}"), InlineKeyboardButton(text="Статистика", callback_data=f"giveaway:stats:{giveaway_id}")],
     ])
 
@@ -1713,6 +1805,7 @@ def giveaway_card(giveaway_id: int) -> str:
     return (
         f"<b>🎁 Розыгрыш #{giveaway_id}</b>\n{html.escape(str(giveaway['title']))}\n\n"
         f"🎟 Билет: <b>{giveaway['ticket_price_rub']} ₽</b>\n"
+        f"⏳ Окончание: <b>{giveaway_end_text(giveaway)}</b>\n"
         f"👥 Участников: <b>{stats['buyers']}</b>\n"
         f"🎫 Билетов: <b>{stats['tickets']}</b>"
     )
@@ -1786,7 +1879,8 @@ async def giveaway_admin_callback(callback: CallbackQuery, bot: Bot) -> None:
         channel = destination_chat_id()
         if not channel: await callback.answer("Не настроен канал публикации.", show_alert=True); return
         try:
-            await bot.send_message(channel, giveaway_card(giveaway_id), reply_markup=giveaway_keyboard(giveaway_id))
+            published = await bot.send_message(channel, giveaway_card(giveaway_id), reply_markup=giveaway_keyboard(giveaway_id))
+            db.set_giveaway_channel_message(giveaway_id, channel, published.message_id)
         except TelegramAPIError: await callback.answer("Не удалось опубликовать. Проверь права бота.", show_alert=True); return
         await callback.answer("Опубликовано."); return
     if action == "broadcast":
@@ -1855,11 +1949,14 @@ async def giveaway_callback(callback: CallbackQuery, bot: Bot) -> None:
         row = db.conn.execute("SELECT COALESCE(SUM(quantity),0) tickets FROM giveaway_tickets WHERE giveaway_id=? AND user_id=? AND status='paid'", (int(raw_id), callback.from_user.id)).fetchone()
         await callback.answer(f"Ваших подтверждённых билетов: {row['tickets']}", show_alert=True); return
     if action != "buy" or giveaway['status'] != 'active': await callback.answer("Розыгрыш завершён.", show_alert=True); return
+    if giveaway['ends_at'] and str(giveaway['ends_at']) <= datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"):
+        await callback.answer("Время розыгрыша уже истекло.", show_alert=True); return
     quantity = int(parts[3]) if len(parts) == 4 and parts[3].isdigit() and 1 <= int(parts[3]) <= 99 else 1
     if not ROLLYPAY_API_KEY or not ROLLYPAY_TERMINAL_ID: await callback.answer("Оплата пока не настроена.", show_alert=True); return
     order_id = f"ticket-{raw_id}-{uuid4().hex[:16]}"
     try:
         amount = int(giveaway['ticket_price_rub']) * quantity
+        db.register_user(callback.from_user.id, callback.from_user.username, callback.from_user.full_name)
         payment = await create_payment(api_base=ROLLYPAY_API_BASE, api_key=ROLLYPAY_API_KEY, terminal_id=ROLLYPAY_TERMINAL_ID, order_id=order_id, amount=Decimal(amount), description=f"{quantity} билет(ов) в розыгрыш #{raw_id}", customer_id=str(callback.from_user.id), metadata={"action":"giveaway_ticket","giveaway_id":raw_id,"buyer_user_id":str(callback.from_user.id),"quantity":str(quantity)}, test=ROLLYPAY_TEST_MODE, success_url=f"https://t.me/{PUBLIC_BOT_USERNAME}", fail_url=f"https://t.me/{PUBLIC_BOT_USERNAME}")
         db.create_giveaway_ticket(str(payment['payment_id']), order_id, int(raw_id), callback.from_user.id, amount, quantity)
     except (RollyPayError, KeyError, ValueError): await callback.answer("Не удалось создать оплату.", show_alert=True); return

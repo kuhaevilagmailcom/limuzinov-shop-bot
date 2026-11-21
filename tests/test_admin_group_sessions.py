@@ -39,17 +39,23 @@ class AdminGroupSessionTests(unittest.IsolatedAsyncioTestCase):
         set_active_price.assert_called_once_with(250)
         self.assertNotIn(111, app.admin_sessions)
 
-    async def test_group_title_creates_giveaway_in_that_group(self):
+    async def test_group_creation_collects_title_price_and_end_date(self):
         message = group_message("Telegram Premium")
         app.admin_sessions[111] = ("giveaway_title", -10042)
         with patch.object(app, "is_moderation_admin", new=AsyncMock(return_value=True)), \
              patch.object(app.db, "create_giveaway", return_value=9) as create, \
              patch.object(app.db, "set_giveaway_message"), \
-             patch.object(app, "ticket_price_rub", return_value=100), \
              patch.object(app, "giveaway_card", return_value="card"), \
-             patch.object(app, "giveaway_keyboard", return_value=object()):
+             patch.object(app, "giveaway_keyboard", return_value=object()), \
+             patch.object(app, "parse_giveaway_end", return_value="2026-11-25 18:00:00"):
             self.assertTrue(await app.consume_admin_session(message, AsyncMock()))
-        create.assert_called_once_with("Telegram Premium", 100, 111, -10042)
+            self.assertEqual(app.admin_sessions[111][0], "giveaway_price")
+            message.text = "100"
+            self.assertTrue(await app.consume_admin_session(message, AsyncMock()))
+            self.assertEqual(app.admin_sessions[111][0], "giveaway_ends_at")
+            message.text = "4д"
+            self.assertTrue(await app.consume_admin_session(message, AsyncMock()))
+        create.assert_called_once_with("Telegram Premium", 100, 111, -10042, "2026-11-25 18:00:00")
 
     async def test_group_invoice_input_creates_invoice(self):
         message = group_message("500 Оплата услуги")
