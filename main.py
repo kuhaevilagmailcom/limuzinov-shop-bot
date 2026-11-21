@@ -1812,12 +1812,19 @@ def giveaway_card(giveaway_id: int) -> str:
 
 
 def admin_menu_keyboard() -> InlineKeyboardMarkup:
+    def button(label: str, callback_data: str, icon: str) -> InlineKeyboardButton:
+        return InlineKeyboardButton(
+            text=label,
+            callback_data=callback_data,
+            icon_custom_emoji_id=CUSTOM_EMOJIS[icon][0],
+        )
+
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎁 Создать розыгрыш", callback_data="gadmin:create"), InlineKeyboardButton(text="🎟 Цена билета", callback_data="gadmin:price")],
-        [InlineKeyboardButton(text="📢 Опубликовать в канал", callback_data="gadmin:publish"), InlineKeyboardButton(text="📨 Разослать", callback_data="gadmin:broadcast")],
-        [InlineKeyboardButton(text="📊 Статистика", callback_data="gadmin:stats"), InlineKeyboardButton(text="🏆 Подвести итоги", callback_data="gadmin:draw")],
-        [InlineKeyboardButton(text="💳 Создать счёт", callback_data="gadmin:invoice"), InlineKeyboardButton(text="💸 Цены услуг", callback_data="gadmin:prices")],
-        [InlineKeyboardButton(text="👥 Пользователи", callback_data="gadmin:users"), InlineKeyboardButton(text="📈 Топ модераторов", callback_data="gadmin:top")],
+        [button("Создать розыгрыш", "gadmin:create", "check"), button("Цена билета", "gadmin:price", "info")],
+        [button("Опубликовать в канал", "gadmin:publish", "check"), button("Разослать", "gadmin:broadcast", "chat")],
+        [button("Статистика", "gadmin:stats", "info"), button("Подвести итоги", "gadmin:draw", "timer")],
+        [button("Создать счёт", "gadmin:invoice", "check"), button("Цены услуг", "gadmin:prices", "info")],
+        [button("Пользователи", "gadmin:users", "profile"), button("Топ модераторов", "gadmin:top", "info")],
     ])
 
 
@@ -1825,7 +1832,10 @@ def admin_menu_keyboard() -> InlineKeyboardMarkup:
 async def admin_menu_command(message: Message, bot: Bot) -> None:
     if not message.from_user or not await is_moderation_admin(bot, message.from_user.id):
         await message.answer("Команда доступна только администратору."); return
-    await message.answer("<b>Админ-меню</b>\nУправление оплатами и розыгрышами.", reply_markup=admin_menu_keyboard())
+    await message.answer(
+        f"{ce('info')} <b>Админ-меню</b>\nУправление оплатами и розыгрышами.",
+        reply_markup=admin_menu_keyboard(),
+    )
 
 
 @router.callback_query(F.data.startswith("gadmin:"))

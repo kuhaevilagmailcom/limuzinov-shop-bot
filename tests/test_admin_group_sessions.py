@@ -74,3 +74,9 @@ class AdminGroupSessionTests(unittest.IsolatedAsyncioTestCase):
         app.admin_sessions[111] = ("ticket_price", -10042)
         with patch.object(app, "is_moderation_admin", new=AsyncMock(return_value=True)):
             self.assertFalse(await app.consume_admin_session(group_message("250", -10099), AsyncMock()))
+
+    async def test_admin_menu_uses_telegram_custom_emoji_button_icons(self):
+        keyboard = app.admin_menu_keyboard()
+        buttons = [button for row in keyboard.inline_keyboard for button in row]
+        self.assertTrue(all(button.icon_custom_emoji_id for button in buttons))
+        self.assertTrue(all(not button.text.startswith(("🎁", "🎟", "📢", "📨", "📊", "🏆", "💳", "💸", "👥", "📈")) for button in buttons))
