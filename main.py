@@ -3078,6 +3078,16 @@ async def recover(bot: Bot) -> None:
         await send_to_moderation_group(bot, sub_id)
 
 
+def restart_notice() -> str:
+    """Service notice shown to moderators after a successful bot restart."""
+    magnitogorsk_time = datetime.now(ZoneInfo("Asia/Yekaterinburg")).strftime("%d.%m.%Y %H:%M")
+    return (
+        f"{ce('check')} <b>Бот перезапущен</b>\n"
+        f"{ce('timer')} Магнитогорск: <b>{magnitogorsk_time}</b>\n\n"
+        "Позор МГН крутой бот, йоу"
+    )
+
+
 async def main() -> None:
     if not BOT_TOKEN or BOT_TOKEN == "PASTE_BOT_TOKEN_HERE":
         raise SystemExit("Заполни BOT_TOKEN в переменных окружения хостинга или в .env.")
@@ -3121,6 +3131,10 @@ async def main() -> None:
             db.user_count(),
             db.known_submission_user_count(),
         )
+        try:
+            await safe_bot_send_message(bot, moderation_chat_id(), restart_notice())
+        except TelegramAPIError as exc:
+            logger.warning("Could not send restart notice to the moderation group: %s", exc)
         await cleanup_processed_inline_keyboards(bot)
         recovery_job = asyncio.create_task(recover(bot))
         removal_reconcile_job = asyncio.create_task(reconcile_removal_payments(bot))

@@ -1,6 +1,7 @@
 """Regression tests for values entered from the group admin panel."""
 import atexit
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -80,3 +81,9 @@ class AdminGroupSessionTests(unittest.IsolatedAsyncioTestCase):
         buttons = [button for row in keyboard.inline_keyboard for button in row]
         self.assertTrue(all(button.icon_custom_emoji_id for button in buttons))
         self.assertTrue(all(not button.text.startswith(("🎁", "🎟", "📢", "📨", "📊", "🏆", "💳", "💸", "👥", "📈")) for button in buttons))
+
+    async def test_restart_notice_has_magnitogorsk_datetime_and_signature(self):
+        notice = app.restart_notice()
+        self.assertIn("Бот перезапущен", notice)
+        self.assertRegex(notice, r"Магнитогорск: <b>\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}</b>")
+        self.assertTrue(notice.endswith("Позор МГН крутой бот, йоу"))
