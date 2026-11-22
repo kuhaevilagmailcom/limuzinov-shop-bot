@@ -1302,7 +1302,11 @@ async def start_post_action_payment(message: Message, sub, action: str) -> bool:
 
     amount = removal_price_rub() if action == "post_removal" else author_info_price_rub()
     prefix = "postrm" if action == "post_removal" else "postinfo"
-    db.register_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
+    db.register_user(
+                message.from_user.id,
+                getattr(message.from_user, "username", None),
+                getattr(message.from_user, "full_name", "Пользователь"),
+            )
     order_id = f"{prefix}-{int(sub['id'])}-{uuid4().hex[:16]}"
     title = "Удаление поста" if action == "post_removal" else "Автор публикации"
     metadata = {
