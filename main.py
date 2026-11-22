@@ -1476,12 +1476,12 @@ def payment_group_text(payment) -> str:
     username = str(payment["buyer_username"] or "").lstrip("@")
     username_text = "@" + html.escape(username) if username else "не указан"
     return (
-        f"✅ <b>Оплата подтверждена — {html.escape(kind)}</b>\\n\\n"
-        f"👤 Имя: <b>{html.escape(str(payment['buyer_name']))}</b>\\n"
-        f"🔗 Username: <b>{username_text}</b>\\n"
-        f"🆔 Telegram ID: <code>{int(payment['buyer_id'])}</code>\\n"
-        f"💰 Сумма: <b>{int(payment['amount_rub'])} ₽</b>\\n"
-        f"📦 Назначение: {html.escape(str(payment['description']))}\\n"
+        f"✅ <b>Оплата подтверждена — {html.escape(kind)}</b>\n\n"
+        f"👤 Имя: <b>{html.escape(str(payment['buyer_name']))}</b>\n"
+        f"🔗 Username: <b>{username_text}</b>\n"
+        f"🆔 Telegram ID: <code>{int(payment['buyer_id'])}</code>\n"
+        f"💰 Сумма: <b>{int(payment['amount_rub'])} ₽</b>\n"
+        f"📦 Назначение: {html.escape(str(payment['description']))}\n"
         f"🧾 Платёж: <code>{html.escape(str(payment['payment_id'])[:120])}</code>"
     )
 
@@ -1863,22 +1863,22 @@ def render_payments_page(status_filter: str = "all", page: int = 0) -> str:
         f"Всего: <b>{counts['total']}</b> · Оплачено: <b>{counts['paid']}</b> · "
         f"Не оплачено: <b>{counts['unpaid']}</b>",
         f"Выручка: <b>{counts['revenue']} ₽</b>",
-        f"\\n<b>{heading}</b> · страница {page + 1}/{max(1, (total + PAYMENTS_PAGE_SIZE - 1) // PAYMENTS_PAGE_SIZE)}",
+        f"\n<b>{heading}</b> · страница {page + 1}/{max(1, (total + PAYMENTS_PAGE_SIZE - 1) // PAYMENTS_PAGE_SIZE)}",
     ]
     for index, payment in enumerate(records, page * PAYMENTS_PAGE_SIZE + 1):
         username = str(payment["buyer_username"] or "").lstrip("@")
         username_display = "@" + html.escape(username) if username else "не указан"
         lines.append(
-            f"\\n<b>{index}. {payment_status_label(str(payment['status']))}</b>"
-            f"\\n{html.escape(str(payment['description']))}"
-            f"\\n👤 {html.escape(str(payment['buyer_name']))} · {username_display}"
-            f"\\n🆔 <code>{int(payment['buyer_id'])}</code> · 💰 <b>{int(payment['amount_rub'])} ₽</b>"
-            f"\\n🕒 {html.escape(str(payment['paid_at'] or payment['created_at']))}"
-            f"\\n<code>{html.escape(str(payment['payment_id'])[:72])}</code>"
+            f"\n<b>{index}. {payment_status_label(str(payment['status']))}</b>"
+            f"\n{html.escape(str(payment['description']))}"
+            f"\n👤 {html.escape(str(payment['buyer_name']))} · {username_display}"
+            f"\n🆔 <code>{int(payment['buyer_id'])}</code> · 💰 <b>{int(payment['amount_rub'])} ₽</b>"
+            f"\n🕒 {html.escape(str(payment['paid_at'] or payment['created_at']))}"
+            f"\n<code>{html.escape(str(payment['payment_id'])[:72])}</code>"
         )
     if not records:
-        lines.append("\\nПлатежей в этом разделе пока нет.")
-    return "\\n".join(lines)
+        lines.append("\nПлатежей в этом разделе пока нет.")
+    return "\n".join(lines)
 
 
 def payments_page_keyboard(status_filter: str = "all", page: int = 0) -> InlineKeyboardMarkup:
@@ -1968,7 +1968,7 @@ async def giveaway_admin_callback(callback: CallbackQuery, bot: Bot) -> None:
         return
     if action == "menu":
         await callback.answer()
-        await safe_edit_text(callback.message, f"{ce('info')} <b>Админ-меню</b>\\nУправление оплатами и розыгрышами.", reply_markup=admin_menu_keyboard())
+        await safe_edit_text(callback.message, f"{ce('info')} <b>Админ-меню</b>\nУправление оплатами и розыгрышами.", reply_markup=admin_menu_keyboard())
         return
     active = db.active_giveaway()
     if action == "create":
