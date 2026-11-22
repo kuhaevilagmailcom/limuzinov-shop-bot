@@ -39,6 +39,35 @@ def resolve_database_path(
     return str(target)
 
 
+
+PAYMENT_LEDGER_SQL = """
+    SELECT p.payment_id, p.payment_type, p.order_id, p.buyer_id,
+           p.amount_rub, p.status, p.created_at, p.paid_at, p.description,
+           COALESCE(NULLIF(u.full_name, ''), 'Пользователь') AS buyer_name,
+           COALESCE(u.username, '') AS buyer_username
+    FROM (
+        SELECT payment_id, 'post_action' AS payment_type, order_id,
+               buyer_user_id AS buyer_id, amount_rub, status, created_at, paid_at,
+               CASE action
+                   WHEN 'author_lookup' THEN 'Информация об авторе'
+                   ELSE 'Удаление публикации'
+               END AS description
+        FROM removal_payments
+        UNION ALL
+        SELECT payment_id, 'invoice', order_id, buyer_user_id, amount_rub,
+               status, created_at, paid_at, description
+        FROM invoices
+        UNION ALL
+        SELECT t.payment_id, 'giveaway', t.order_id, t.user_id, t.amount_rub,
+               t.status, t.created_at, t.paid_at,
+               'Билеты (' || t.quantity || '): ' || g.title
+        FROM giveaway_tickets AS t
+        JOIN giveaways AS g ON g.id = t.giveaway_id
+    ) AS p
+    LEFT JOIN bot_users AS u ON u.user_id = p.buyer_id
+"""
+
+
 class Storage:
     def __init__(self, db_path: str):
         Path(db_path).expanduser().parent.mkdir(parents=True, exist_ok=True)
@@ -137,6 +166,15 @@ class Storage:
                 status TEXT NOT NULL DEFAULT 'created', created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 paid_at TEXT
             );
+            CREATE TABLE IF NOT EXISTS payment_notifications (
+                payment_type TEXT NOT NULL,
+                payment_id TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                sent_at TEXT,
+                PRIMARY KEY (payment_type, payment_id)
+            );
+            CREATE INDEX IF NOT EXISTS payment_notifications_pending_idx
+                ON payment_notifications(sent_at, created_at);
             CREATE TABLE IF NOT EXISTS giveaways (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL,
                 ticket_price_rub INTEGER NOT NULL, created_by_id INTEGER NOT NULL,
@@ -446,9 +484,18 @@ class Storage:
     def set_removal_payment_status(self, payment_id: str, status: str) -> None:
         with self.conn:
             self.conn.execute(
-                "UPDATE removal_payments SET status=?, paid_at=CASE WHEN ?='paid' THEN datetime('now') ELSE paid_at END "
-                "WHERE payment_id=? AND status!='paid'", (status[:32], status, payment_id)
+                "UPDATE removal_payments SET status=?, "
+                "paid_at=CASE WHEN ? IN ('paid','paid_duplicate','processing') THEN COALESCE(paid_at,datetime('now')) ELSE paid_at END "
+                "WHERE payment_id=? AND status NOT IN ('paid','paid_duplicate')",
+                (status[:32], status, payment_id),
             )
+            if status in {"paid", "paid_duplicate", "processing"}:
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO payment_notifications(payment_type,payment_id) "
+                    "SELECT 'post_action',payment_id FROM removal_payments "
+                    "WHERE payment_id=? AND status IN ('paid','paid_duplicate','processing')",
+                    (payment_id,),
+                )
 
     def author_disclosure_enabled(self, user_id: int) -> bool:
         row = self.conn.execute(
@@ -821,6 +868,47 @@ class Storage:
             )
         ]
 
+
+    def payment_counts(self) -> sqlite3.Row:
+        return self.conn.execute(
+            "SELECT COUNT(*) AS total, "
+            "COALESCE(SUM(CASE WHEN status IN ('paid','paid_duplicate','processing') THEN 1 ELSE 0 END), 0) AS paid, "
+            "COALESCE(SUM(CASE WHEN status NOT IN ('paid','paid_duplicate','processing') THEN 1 ELSE 0 END), 0) AS unpaid, "
+            "COALESCE(SUM(CASE WHEN status IN ('paid','paid_duplicate','processing') THEN amount_rub ELSE 0 END), 0) AS revenue "
+            "FROM (" + PAYMENT_LEDGER_SQL + ")"
+        ).fetchone()
+
+    def list_payments(self, status_filter: str = "all", offset: int = 0, limit: int = 8) -> list[sqlite3.Row]:
+        if status_filter not in {"all", "paid", "unpaid"}:
+            raise ValueError("Unknown payment filter")
+        where = {
+            "all": "",
+            "paid": "WHERE status IN ('paid','paid_duplicate','processing')",
+            "unpaid": "WHERE status NOT IN ('paid','paid_duplicate','processing')",
+        }[status_filter]
+        return list(self.conn.execute(
+            "SELECT * FROM (" + PAYMENT_LEDGER_SQL + ") " + where +
+            " ORDER BY created_at DESC, payment_id DESC LIMIT ? OFFSET ?",
+            (max(1, min(int(limit), 50)), max(0, int(offset))),
+        ))
+
+    def pending_payment_notifications(self, limit: int = 50) -> list[sqlite3.Row]:
+        return list(self.conn.execute(
+            "SELECT p.* FROM payment_notifications AS n "
+            "JOIN (" + PAYMENT_LEDGER_SQL + ") AS p "
+            "ON p.payment_type=n.payment_type AND p.payment_id=n.payment_id "
+            "WHERE n.sent_at IS NULL ORDER BY n.created_at, n.payment_id LIMIT ?",
+            (max(1, min(int(limit), 100)),),
+        ))
+
+    def mark_payment_notified(self, payment_type: str, payment_id: str) -> None:
+        with self.conn:
+            self.conn.execute(
+                "UPDATE payment_notifications SET sent_at=datetime('now') "
+                "WHERE payment_type=? AND payment_id=? AND sent_at IS NULL",
+                (payment_type, payment_id),
+            )
+
     def create_invoice(self, payment_id: str, order_id: str, buyer_id: int, admin_id: int, amount: int, description: str) -> None:
         with self.conn:
             self.conn.execute("INSERT INTO invoices(payment_id,order_id,buyer_user_id,created_by_id,amount_rub,description) VALUES(?,?,?,?,?,?)", (payment_id, order_id, buyer_id, admin_id, amount, description[:255]))
@@ -834,7 +922,18 @@ class Storage:
 
     def set_invoice_status(self, payment_id: str, status: str) -> None:
         with self.conn:
-            self.conn.execute("UPDATE invoices SET status=?, paid_at=CASE WHEN ?='paid' THEN datetime('now') ELSE paid_at END WHERE payment_id=? AND status!='paid'", (status, status, payment_id))
+            self.conn.execute(
+                "UPDATE invoices SET status=?, "
+                "paid_at=CASE WHEN ?='paid' THEN COALESCE(paid_at,datetime('now')) ELSE paid_at END "
+                "WHERE payment_id=? AND status!='paid'",
+                (status, status, payment_id),
+            )
+            if status == "paid":
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO payment_notifications(payment_type,payment_id) "
+                    "SELECT 'invoice',payment_id FROM invoices WHERE payment_id=? AND status='paid'",
+                    (payment_id,),
+                )
 
     def create_giveaway(self, title: str, price: int, admin_id: int, chat_id: int, ends_at: str | None = None) -> int:
         with self.conn:
@@ -885,7 +984,19 @@ class Storage:
 
     def set_giveaway_ticket_status(self, payment_id: str, status: str) -> None:
         with self.conn:
-            self.conn.execute("UPDATE giveaway_tickets SET status=?, paid_at=CASE WHEN ?='paid' THEN datetime('now') ELSE paid_at END WHERE payment_id=? AND status!='paid'", (status, status, payment_id))
+            self.conn.execute(
+                "UPDATE giveaway_tickets SET status=?, "
+                "paid_at=CASE WHEN ?='paid' THEN COALESCE(paid_at,datetime('now')) ELSE paid_at END "
+                "WHERE payment_id=? AND status!='paid'",
+                (status, status, payment_id),
+            )
+            if status == "paid":
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO payment_notifications(payment_type,payment_id) "
+                    "SELECT 'giveaway',payment_id FROM giveaway_tickets "
+                    "WHERE payment_id=? AND status='paid'",
+                    (payment_id,),
+                )
 
     def giveaway_stats(self, giveaway_id: int) -> sqlite3.Row | None:
         return self.conn.execute("SELECT g.*, COALESCE(SUM(CASE WHEN t.status='paid' THEN t.quantity END),0) tickets, COUNT(DISTINCT CASE WHEN t.status='paid' THEN t.user_id END) buyers, COALESCE(SUM(CASE WHEN t.status='paid' THEN t.amount_rub END),0) revenue FROM giveaways g LEFT JOIN giveaway_tickets t ON t.giveaway_id=g.id WHERE g.id=? GROUP BY g.id", (giveaway_id,)).fetchone()

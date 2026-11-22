@@ -113,6 +113,7 @@ reply_jobs: dict[int, asyncio.Task] = {}
 broadcast_sessions: dict[int, dict[str, object]] = {}
 admin_sessions: dict[int, tuple[object, ...]] = {}
 USERS_PAGE_SIZE = 10
+PAYMENTS_PAGE_SIZE = 8
 resolved_destination_chat_id: int | None = None
 resolved_moderation_chat_id: int | None = None
 
@@ -1301,6 +1302,11 @@ async def start_post_action_payment(message: Message, sub, action: str) -> bool:
 
     amount = removal_price_rub() if action == "post_removal" else author_info_price_rub()
     prefix = "postrm" if action == "post_removal" else "postinfo"
+    db.register_user(
+        message.from_user.id,
+        getattr(message.from_user, "username", None),
+        getattr(message.from_user, "full_name", "Пользователь"),
+    )
     order_id = f"{prefix}-{int(sub['id'])}-{uuid4().hex[:16]}"
     title = "Удаление поста" if action == "post_removal" else "Автор публикации"
     metadata = {
@@ -1452,6 +1458,57 @@ async def deliver_author_info(bot: Bot, payment) -> None:
     )
 
 
+
+def verified_rollypay_payment(remote: dict, local) -> bool:
+    """Do not credit an unrelated payment or a test payment on production."""
+    is_test = str(remote.get("test", False)).strip().lower() in {"1", "true", "yes"}
+    return (
+        str(remote.get("payment_id")) == str(local["payment_id"])
+        and str(remote.get("order_id")) == str(local["order_id"])
+        and str(remote.get("currency") or remote.get("payment_currency") or "").upper() == "RUB"
+        and Decimal(str(remote.get("amount"))) == Decimal(int(local["amount_rub"]))
+        and (ROLLYPAY_TEST_MODE or not is_test)
+    )
+
+
+def payment_group_text(payment) -> str:
+    kind = {
+        "post_action": "Платная услуга",
+        "invoice": "Счёт",
+        "giveaway": "Билеты в розыгрыш",
+    }.get(str(payment["payment_type"]), "Оплата")
+    username = str(payment["buyer_username"] or "").lstrip("@")
+    username_text = "@" + html.escape(username) if username else "не указан"
+    return (
+        f"✅ <b>Оплата подтверждена — {html.escape(kind)}</b>\n\n"
+        f"👤 Имя: <b>{html.escape(str(payment['buyer_name']))}</b>\n"
+        f"🔗 Username: <b>{username_text}</b>\n"
+        f"🆔 Telegram ID: <code>{int(payment['buyer_id'])}</code>\n"
+        f"💰 Сумма: <b>{int(payment['amount_rub'])} ₽</b>\n"
+        f"📦 Назначение: {html.escape(str(payment['description']))}\n"
+        f"🧾 Платёж: <code>{html.escape(str(payment['payment_id'])[:120])}</code>"
+    )
+
+
+async def flush_payment_group_notifications(bot: Bot) -> None:
+    """Persistent outbox: a failed group delivery stays pending for the next poll."""
+    chat_id = moderation_chat_id()
+    if chat_id is None:
+        logger.error("Paid-payment alerts pending: MODERATION_CHAT_ID is not configured")
+        return
+    for payment in db.pending_payment_notifications():
+        try:
+            await safe_bot_send_message(bot, chat_id, payment_group_text(payment))
+        except TelegramAPIError as exc:
+            logger.warning(
+                "Payment alert not delivered to moderation group (will retry) %s/%s: %s",
+                payment["payment_type"], payment["payment_id"], exc,
+            )
+            continue
+        db.mark_payment_notified(str(payment["payment_type"]), str(payment["payment_id"]))
+        await asyncio.sleep(0.05)
+
+
 async def reconcile_removal_payments(bot: Bot) -> None:
     """Poll RollyPay independently of website webhook; fulfill both paid actions."""
     while True:
@@ -1465,17 +1522,10 @@ async def reconcile_removal_payments(bot: Bot) -> None:
                     )
                     status = str(remote.get("status") or "").lower()
                     if status == "paid":
-                        currency = str(remote.get("currency") or remote.get("payment_currency") or "").upper()
-                        amount = Decimal(str(remote.get("amount")))
-                        if (
-                            str(remote.get("payment_id")) != payment_id
-                            or str(remote.get("order_id")) != str(payment["order_id"])
-                            or currency != "RUB"
-                            or amount != Decimal(int(payment["amount_rub"]))
-                            or (bool(remote.get("test")) and not ROLLYPAY_TEST_MODE)
-                        ):
+                        if not verified_rollypay_payment(remote, payment):
                             logger.error("Paid post action failed exact validation: %s", payment_id)
                             continue
+                        db.set_removal_payment_status(payment_id, "processing")
                         action = str(payment["action"] or "post_removal")
                         if action == "author_lookup":
                             await deliver_author_info(bot, payment)
@@ -1514,38 +1564,19 @@ async def reconcile_removal_payments(bot: Bot) -> None:
                 try:
                     remote = await get_payment(api_base=ROLLYPAY_API_BASE, api_key=ROLLYPAY_API_KEY, payment_id=str(ticket['payment_id']))
                     status = str(remote.get('status') or '').lower()
-                    if status == 'paid' and str(remote.get('order_id')) == str(ticket['order_id']) and Decimal(str(remote.get('amount'))) == Decimal(int(ticket['amount_rub'])) and str(remote.get('currency') or remote.get('payment_currency') or '').upper() == 'RUB':
+                    if status == 'paid' and verified_rollypay_payment(remote, ticket):
                         db.set_giveaway_ticket_status(str(ticket['payment_id']), 'paid')
                         await safe_notify(bot, int(ticket['user_id']), f"Оплата подтверждена. Билет в розыгрыш «{html.escape(str(ticket['title']))}» получен.")
-                        username = f"@{html.escape(str(ticket['username']))}" if ticket['username'] else "без username"
-                        full_name = html.escape(str(ticket['full_name'] or 'Пользователь'))
-                        await safe_bot_send_message(
-                            bot, moderation_chat_id(),
-                            f"✅ <b>Новая оплата за билеты</b>\n\n"
-                            f"🎁 {html.escape(str(ticket['title']))}\n"
-                            f"👤 {full_name} · {username}\n"
-                            f"🆔 <code>{ticket['user_id']}</code>\n"
-                            f"🎟 Билетов: <b>{ticket['quantity']}</b> · <b>{ticket['amount_rub']} ₽</b>",
-                        )
                     elif status in {'expired', 'canceled', 'cancelled', 'failed'}: db.set_giveaway_ticket_status(str(ticket['payment_id']), status)
                 except (RollyPayError, InvalidOperation, TypeError, ValueError) as exc: logger.warning('Ticket reconciliation failed: %s', exc)
             for invoice in db.pending_invoices():
                 try:
                     remote = await get_payment(api_base=ROLLYPAY_API_BASE, api_key=ROLLYPAY_API_KEY, payment_id=str(invoice['payment_id']))
                     status = str(remote.get('status') or '').lower()
-                    if status == 'paid' and str(remote.get('order_id')) == str(invoice['order_id']) and Decimal(str(remote.get('amount'))) == Decimal(int(invoice['amount_rub'])) and str(remote.get('currency') or remote.get('payment_currency') or '').upper() == 'RUB':
+                    if status == 'paid' and verified_rollypay_payment(remote, invoice):
                         db.set_invoice_status(str(invoice['payment_id']), 'paid')
                         await safe_notify(bot, int(invoice['buyer_user_id']), 'Оплата по счёту подтверждена.')
                         await safe_notify(bot, int(invoice['created_by_id']), f"Счёт для <code>{invoice['buyer_user_id']}</code> оплачен.")
-                        username = f"@{html.escape(str(invoice['username']))}" if invoice['username'] else "без username"
-                        full_name = html.escape(str(invoice['full_name'] or 'Пользователь'))
-                        await safe_bot_send_message(
-                            bot, moderation_chat_id(),
-                            f"✅ <b>Новая оплата по счёту</b>\n\n"
-                            f"👤 {full_name} · {username}\n"
-                            f"🆔 <code>{invoice['buyer_user_id']}</code>\n"
-                            f"💳 {html.escape(str(invoice['description']))} · <b>{invoice['amount_rub']} ₽</b>",
-                        )
                     elif status in {'expired', 'canceled', 'cancelled', 'failed'}: db.set_invoice_status(str(invoice['payment_id']), status)
                 except (RollyPayError, InvalidOperation, TypeError, ValueError) as exc: logger.warning('Invoice reconciliation failed: %s', exc)
             for giveaway in db.due_giveaways(datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")):
@@ -1563,6 +1594,7 @@ async def reconcile_removal_payments(bot: Bot) -> None:
                         )
                     except TelegramAPIError as exc:
                         logger.warning("Could not close giveaway card %s: %s", giveaway_id, exc)
+        await flush_payment_group_notifications(bot)
         await asyncio.sleep(12)
 
 async def consume_admin_session(message: Message, bot: Bot) -> bool:
@@ -1590,6 +1622,11 @@ async def consume_admin_session(message: Message, bot: Bot) -> bool:
             if not ROLLYPAY_API_KEY or not ROLLYPAY_TERMINAL_ID:
                 await message.answer("Оплата RollyPay пока не настроена."); return True
             amount, description = int(parts[0]), parts[1]
+            db.register_user(
+                message.from_user.id,
+                getattr(message.from_user, "username", None),
+                getattr(message.from_user, "full_name", "Пользователь"),
+            )
             order_id = f"invoice-{uuid4().hex[:18]}"
             try:
                 payment = await create_payment(api_base=ROLLYPAY_API_BASE, api_key=ROLLYPAY_API_KEY, terminal_id=ROLLYPAY_TERMINAL_ID, order_id=order_id, amount=Decimal(amount), description=description, customer_id=str(sender_id), metadata={"action":"invoice","buyer_user_id":str(sender_id),"created_by":str(sender_id)}, test=ROLLYPAY_TEST_MODE, success_url=f"https://t.me/{PUBLIC_BOT_USERNAME}", fail_url=f"https://t.me/{PUBLIC_BOT_USERNAME}")
@@ -1811,6 +1848,97 @@ def giveaway_card(giveaway_id: int) -> str:
     )
 
 
+
+def payment_status_label(status: str) -> str:
+    return {
+        "paid": "✅ Оплачен",
+        "paid_duplicate": "⚠️ Оплачен повторно",
+        "created": "⏳ Ожидает оплаты",
+        "processing": "✅ Оплачен · выполняется",
+        "expired": "⌛ Истёк",
+        "canceled": "🚫 Отменён",
+        "cancelled": "🚫 Отменён",
+        "failed": "❌ Ошибка",
+    }.get(status, html.escape(status))
+
+
+def render_payments_page(status_filter: str = "all", page: int = 0) -> str:
+    counts = db.payment_counts()
+    total = int(counts[{"all": "total", "paid": "paid", "unpaid": "unpaid"}[status_filter]])
+    page = min(max(0, page), max(0, (total - 1) // PAYMENTS_PAGE_SIZE))
+    records = db.list_payments(status_filter, page * PAYMENTS_PAGE_SIZE, PAYMENTS_PAGE_SIZE)
+    heading = {"all": "Все", "paid": "Оплаченные", "unpaid": "Неоплаченные"}[status_filter]
+    lines = [
+        "💳 <b>Платежи</b>",
+        f"Всего: <b>{counts['total']}</b> · Оплачено: <b>{counts['paid']}</b> · "
+        f"Не оплачено: <b>{counts['unpaid']}</b>",
+        f"Выручка: <b>{counts['revenue']} ₽</b>",
+        f"\n<b>{heading}</b> · страница {page + 1}/{max(1, (total + PAYMENTS_PAGE_SIZE - 1) // PAYMENTS_PAGE_SIZE)}",
+    ]
+    for index, payment in enumerate(records, page * PAYMENTS_PAGE_SIZE + 1):
+        username = str(payment["buyer_username"] or "").lstrip("@")
+        username_display = "@" + html.escape(username) if username else "не указан"
+        lines.append(
+            f"\n<b>{index}. {payment_status_label(str(payment['status']))}</b>"
+            f"\n{html.escape(str(payment['description']))}"
+            f"\n👤 {html.escape(str(payment['buyer_name']))} · {username_display}"
+            f"\n🆔 <code>{int(payment['buyer_id'])}</code> · 💰 <b>{int(payment['amount_rub'])} ₽</b>"
+            f"\n🕒 {html.escape(str(payment['paid_at'] or payment['created_at']))}"
+            f"\n<code>{html.escape(str(payment['payment_id'])[:72])}</code>"
+        )
+    if not records:
+        lines.append("\nПлатежей в этом разделе пока нет.")
+    return "\n".join(lines)
+
+
+def payments_page_keyboard(status_filter: str = "all", page: int = 0) -> InlineKeyboardMarkup:
+    counts = db.payment_counts()
+    total = int(counts[{"all": "total", "paid": "paid", "unpaid": "unpaid"}[status_filter]])
+    last_page = max(0, (total - 1) // PAYMENTS_PAGE_SIZE)
+    page = min(max(0, page), last_page)
+    filters = [
+        InlineKeyboardButton(
+            text=("● " if status_filter == key else "") + label,
+            callback_data=f"gpay:{key}:0",
+        )
+        for key, label in (("all", "Все"), ("paid", "Оплаченные"), ("unpaid", "Неоплаченные"))
+    ]
+    rows = [filters]
+    navigation = []
+    if page > 0:
+        navigation.append(InlineKeyboardButton(text="◀️ Назад", callback_data=f"gpay:{status_filter}:{page - 1}"))
+    if page < last_page:
+        navigation.append(InlineKeyboardButton(text="Вперёд ▶️", callback_data=f"gpay:{status_filter}:{page + 1}"))
+    if navigation:
+        rows.append(navigation)
+    rows.append([InlineKeyboardButton(text="↩️ Админ-меню", callback_data="gadmin:menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.callback_query(F.data.startswith("gpay:"))
+async def payments_pagination_callback(callback: CallbackQuery, bot: Bot) -> None:
+    if not callback.from_user or not callback.message or not callback.data:
+        return
+    if not await is_moderation_admin(bot, callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    parts = callback.data.split(":")
+    if len(parts) != 3 or parts[1] not in {"all", "paid", "unpaid"} or not parts[2].isdigit():
+        await callback.answer("Некорректный фильтр.", show_alert=True)
+        return
+    status_filter = parts[1]
+    page = min(int(parts[2]), 1_000_000)
+    try:
+        await callback.message.edit_text(
+            render_payments_page(status_filter, page),
+            reply_markup=payments_page_keyboard(status_filter, page),
+        )
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            raise
+    await callback.answer()
+
+
 def admin_menu_keyboard() -> InlineKeyboardMarkup:
     def button(label: str, callback_data: str, icon: str) -> InlineKeyboardButton:
         return InlineKeyboardButton(
@@ -1824,6 +1952,7 @@ def admin_menu_keyboard() -> InlineKeyboardMarkup:
         [button("Опубликовать в канал", "gadmin:publish", "check"), button("Разослать", "gadmin:broadcast", "chat")],
         [button("Статистика", "gadmin:stats", "info"), button("Подвести итоги", "gadmin:draw", "timer")],
         [button("Создать счёт", "gadmin:invoice", "check"), button("Цены услуг", "gadmin:prices", "info")],
+        [button("Платежи", "gadmin:payments", "info")],
         [button("Пользователи", "gadmin:users", "profile"), button("Топ модераторов", "gadmin:top", "info")],
     ])
 
@@ -1843,6 +1972,14 @@ async def giveaway_admin_callback(callback: CallbackQuery, bot: Bot) -> None:
     if not callback.from_user or not callback.message: return
     if not await is_moderation_admin(bot, callback.from_user.id): await callback.answer("Нет доступа.", show_alert=True); return
     action = callback.data.split(":", 1)[1]
+    if action == "payments":
+        await callback.answer()
+        await callback.message.answer(render_payments_page(), reply_markup=payments_page_keyboard())
+        return
+    if action == "menu":
+        await callback.answer()
+        await safe_edit_text(callback.message, f"{ce('info')} <b>Админ-меню</b>\nУправление оплатами и розыгрышами.", reply_markup=admin_menu_keyboard())
+        return
     active = db.active_giveaway()
     if action == "create":
         admin_sessions[callback.from_user.id] = ("giveaway_title", callback.message.chat.id); await callback.answer()
@@ -1911,6 +2048,11 @@ async def invoice_command(message: Message, bot: Bot) -> None:
     if len(parts) < 3 or not parts[1].isdigit() or not 1 <= int(parts[1]) <= 100000:
         await message.answer("Пример: <code>/invoice 500 Оплата услуги</code>"); return
     buyer_id, amount, description = message.from_user.id, int(parts[1]), parts[2]
+    db.register_user(
+        message.from_user.id,
+        getattr(message.from_user, "username", None),
+        getattr(message.from_user, "full_name", "Пользователь"),
+    )
     if not ROLLYPAY_API_KEY or not ROLLYPAY_TERMINAL_ID: await message.answer("Оплата RollyPay пока не настроена."); return
     order_id = f"invoice-{uuid4().hex[:18]}"
     try:
