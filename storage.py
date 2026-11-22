@@ -485,15 +485,15 @@ class Storage:
         with self.conn:
             self.conn.execute(
                 "UPDATE removal_payments SET status=?, "
-                "paid_at=CASE WHEN ? IN ('paid','paid_duplicate') THEN COALESCE(paid_at,datetime('now')) ELSE paid_at END "
+                "paid_at=CASE WHEN ? IN ('paid','paid_duplicate','processing') THEN COALESCE(paid_at,datetime('now')) ELSE paid_at END "
                 "WHERE payment_id=? AND status NOT IN ('paid','paid_duplicate')",
                 (status[:32], status, payment_id),
             )
-            if status in {"paid", "paid_duplicate"}:
+            if status in {"paid", "paid_duplicate", "processing"}:
                 self.conn.execute(
                     "INSERT OR IGNORE INTO payment_notifications(payment_type,payment_id) "
                     "SELECT 'post_action',payment_id FROM removal_payments "
-                    "WHERE payment_id=? AND status IN ('paid','paid_duplicate')",
+                    "WHERE payment_id=? AND status IN ('paid','paid_duplicate','processing')",
                     (payment_id,),
                 )
 
@@ -872,9 +872,9 @@ class Storage:
     def payment_counts(self) -> sqlite3.Row:
         return self.conn.execute(
             "SELECT COUNT(*) AS total, "
-            "COALESCE(SUM(CASE WHEN status IN ('paid','paid_duplicate') THEN 1 ELSE 0 END), 0) AS paid, "
-            "COALESCE(SUM(CASE WHEN status NOT IN ('paid','paid_duplicate') THEN 1 ELSE 0 END), 0) AS unpaid, "
-            "COALESCE(SUM(CASE WHEN status IN ('paid','paid_duplicate') THEN amount_rub ELSE 0 END), 0) AS revenue "
+            "COALESCE(SUM(CASE WHEN status IN ('paid','paid_duplicate','processing') THEN 1 ELSE 0 END), 0) AS paid, "
+            "COALESCE(SUM(CASE WHEN status NOT IN ('paid','paid_duplicate','processing') THEN 1 ELSE 0 END), 0) AS unpaid, "
+            "COALESCE(SUM(CASE WHEN status IN ('paid','paid_duplicate','processing') THEN amount_rub ELSE 0 END), 0) AS revenue "
             "FROM (" + PAYMENT_LEDGER_SQL + ")"
         ).fetchone()
 
@@ -883,8 +883,8 @@ class Storage:
             raise ValueError("Unknown payment filter")
         where = {
             "all": "",
-            "paid": "WHERE status IN ('paid','paid_duplicate')",
-            "unpaid": "WHERE status NOT IN ('paid','paid_duplicate')",
+            "paid": "WHERE status IN ('paid','paid_duplicate','processing')",
+            "unpaid": "WHERE status NOT IN ('paid','paid_duplicate','processing')",
         }[status_filter]
         return list(self.conn.execute(
             "SELECT * FROM (" + PAYMENT_LEDGER_SQL + ") " + where +
