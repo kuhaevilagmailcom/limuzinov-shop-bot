@@ -1303,10 +1303,10 @@ async def start_post_action_payment(message: Message, sub, action: str) -> bool:
     amount = removal_price_rub() if action == "post_removal" else author_info_price_rub()
     prefix = "postrm" if action == "post_removal" else "postinfo"
     db.register_user(
-                message.from_user.id,
-                getattr(message.from_user, "username", None),
-                getattr(message.from_user, "full_name", "Пользователь"),
-            )
+        message.from_user.id,
+        getattr(message.from_user, "username", None),
+        getattr(message.from_user, "full_name", "Пользователь"),
+    )
     order_id = f"{prefix}-{int(sub['id'])}-{uuid4().hex[:16]}"
     title = "Удаление поста" if action == "post_removal" else "Автор публикации"
     metadata = {
@@ -1622,7 +1622,11 @@ async def consume_admin_session(message: Message, bot: Bot) -> bool:
             if not ROLLYPAY_API_KEY or not ROLLYPAY_TERMINAL_ID:
                 await message.answer("Оплата RollyPay пока не настроена."); return True
             amount, description = int(parts[0]), parts[1]
-            db.register_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
+            db.register_user(
+                message.from_user.id,
+                getattr(message.from_user, "username", None),
+                getattr(message.from_user, "full_name", "Пользователь"),
+            )
             order_id = f"invoice-{uuid4().hex[:18]}"
             try:
                 payment = await create_payment(api_base=ROLLYPAY_API_BASE, api_key=ROLLYPAY_API_KEY, terminal_id=ROLLYPAY_TERMINAL_ID, order_id=order_id, amount=Decimal(amount), description=description, customer_id=str(sender_id), metadata={"action":"invoice","buyer_user_id":str(sender_id),"created_by":str(sender_id)}, test=ROLLYPAY_TEST_MODE, success_url=f"https://t.me/{PUBLIC_BOT_USERNAME}", fail_url=f"https://t.me/{PUBLIC_BOT_USERNAME}")
@@ -2044,7 +2048,11 @@ async def invoice_command(message: Message, bot: Bot) -> None:
     if len(parts) < 3 or not parts[1].isdigit() or not 1 <= int(parts[1]) <= 100000:
         await message.answer("Пример: <code>/invoice 500 Оплата услуги</code>"); return
     buyer_id, amount, description = message.from_user.id, int(parts[1]), parts[2]
-    db.register_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
+    db.register_user(
+        message.from_user.id,
+        getattr(message.from_user, "username", None),
+        getattr(message.from_user, "full_name", "Пользователь"),
+    )
     if not ROLLYPAY_API_KEY or not ROLLYPAY_TERMINAL_ID: await message.answer("Оплата RollyPay пока не настроена."); return
     order_id = f"invoice-{uuid4().hex[:18]}"
     try:
