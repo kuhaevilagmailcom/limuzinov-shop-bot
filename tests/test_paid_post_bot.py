@@ -89,7 +89,8 @@ class PaidPostBotTests(unittest.IsolatedAsyncioTestCase):
                         )
         self.assertTrue(success)
         self.assertTrue(create.await_args.kwargs["order_id"].startswith("postinfo-99-"))
-        self.assertIn("Публикация найдена", msg.answer.await_args.args[0])
+        self.assertIn("<b>Инфа #99</b>", msg.answer.await_args.args[0])
+        self.assertEqual(create.await_args.kwargs["description"], "Инфа #99")
 
     async def test_paid_author_invoice_is_separate_action(self):
         msg = fake_message()
@@ -118,3 +119,67 @@ class PaidPostBotTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Poster &lt;One&gt;", sent.kwargs["text"])
         self.assertIn("Poster333", sent.kwargs["text"])
         self.assertIn("<code>333</code>", sent.kwargs["text"])
+
+
+    async def test_forwarded_media_resolves_original_channel_and_post(self):
+        msg = fake_message(None)
+        msg.forward_origin = SimpleNamespace(
+            type="channel", chat=SimpleNamespace(id=-1001234567890), message_id=701
+        )
+        stored = fake_submission()
+        with patch.object(app, "destination_chat_id", return_value=-1001234567890), \
+             patch.object(app, "destination_chat_value", return_value=-1001234567890), \
+             patch.object(app.db, "find_published_submission", return_value=stored) as find, \
+             patch.object(app, "start_post_action_payment", new=AsyncMock(return_value=True)) as pay:
+            self.assertTrue(await app.process_post_link(msg, AsyncMock(), "post_removal"))
+        self.assertEqual(find.call_args.args, (-1001234567890, 701))
+        pay.assert_awaited_once_with(msg, stored, "post_removal", from_forward=True)
+
+    async def test_forwarded_post_from_another_channel_is_rejected(self):
+        msg = fake_message(None)
+        msg.forward_origin = SimpleNamespace(
+            type="channel", chat=SimpleNamespace(id=-1009999999999), message_id=701
+        )
+        with patch.object(app, "destination_chat_id", return_value=-1001234567890), \
+             patch.object(app, "start_post_action_payment", new=AsyncMock()) as pay:
+            self.assertFalse(await app.process_post_link(msg, AsyncMock(), "post_removal"))
+        pay.assert_not_awaited()
+
+    async def test_forward_first_offers_numbered_actions(self):
+        msg = fake_message(None)
+        msg.forward_origin = SimpleNamespace(
+            type="channel", chat=SimpleNamespace(id=-1001234567890), message_id=701
+        )
+        with patch.object(app, "resolve_post_target", new=AsyncMock(return_value=fake_submission(1))):
+            self.assertTrue(await app.offer_forwarded_post_actions(msg, AsyncMock()))
+        rows = msg.answer.await_args.kwargs["reply_markup"].inline_keyboard
+        self.assertEqual([row[0].text for row in rows], ["Удаление поста #99", "Инфа #99"])
+
+    async def test_forward_first_omits_info_without_consent(self):
+        msg = fake_message(None)
+        msg.forward_origin = SimpleNamespace(
+            type="channel", chat=SimpleNamespace(id=-1001234567890), message_id=701
+        )
+        with patch.object(app, "resolve_post_target", new=AsyncMock(return_value=fake_submission(0))):
+            self.assertTrue(await app.offer_forwarded_post_actions(msg, AsyncMock()))
+        rows = msg.answer.await_args.kwargs["reply_markup"].inline_keyboard
+        self.assertEqual([row[0].text for row in rows], ["Удаление поста #99"])
+
+    async def test_forwarded_info_invoice_requires_consent(self):
+        msg = fake_message()
+        with patch.object(app, "create_payment", new=AsyncMock()) as create:
+            self.assertFalse(await app.start_post_action_payment(
+                msg, fake_submission(0), "author_lookup", from_forward=True
+            ))
+        create.assert_not_awaited()
+
+    async def test_removal_title_matches_invoice(self):
+        msg = fake_message()
+        with patch.object(app, "ROLLYPAY_API_KEY", "test-key"), \
+             patch.object(app, "ROLLYPAY_TERMINAL_ID", "test-terminal"), \
+             patch.object(app, "create_payment", new=AsyncMock(return_value={
+                 "payment_id": "payment-delete", "pay_url": "https://example.test/pay"
+             })) as create, patch.object(app.db, "create_removal_payment"):
+            self.assertTrue(await app.start_post_action_payment(msg, fake_submission(), "post_removal"))
+        self.assertIn("<b>Удаление поста #99</b>", msg.answer.await_args.args[0])
+        self.assertEqual(create.await_args.kwargs["description"], "Удаление поста #99")
