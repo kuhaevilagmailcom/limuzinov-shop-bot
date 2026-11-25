@@ -453,6 +453,59 @@ class Storage:
                 (str(chat_id), json.dumps([int(x) for x in message_ids]), submission_id),
             )
 
+    def import_published_submission(
+        self,
+        *,
+        user_id: int,
+        full_name: str,
+        username: str | None,
+        published_chat_id: int | str,
+        published_message_ids: list[int],
+        quote_text: str = "",
+        published_at: str | None = None,
+        removal_token: str | None = None,
+        legacy_submission_id: int | None = None,
+    ) -> tuple[int, bool]:
+        """Idempotently restore a historical channel post into the live database."""
+        message_ids = sorted({int(value) for value in published_message_ids if int(value) > 0})
+        if not message_ids:
+            raise ValueError("At least one published message id is required")
+        channel_id = str(published_chat_id)
+
+        for message_id in message_ids:
+            existing = self.find_published_submission(channel_id, message_id)
+            if existing:
+                return int(existing["id"]), False
+
+        clean_name = full_name.strip() or "Пользователь"
+        clean_username = (username or "").strip().lstrip("@") or None
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO bot_users(user_id,username,full_name) VALUES(?,?,?) "
+                "ON CONFLICT(user_id) DO UPDATE SET "
+                "username=COALESCE(excluded.username,bot_users.username), "
+                "full_name=CASE WHEN excluded.full_name!='' THEN excluded.full_name ELSE bot_users.full_name END, "
+                "last_seen_at=datetime('now')",
+                (int(user_id), clean_username, clean_name),
+            )
+            cur = self.conn.execute(
+                "INSERT INTO submissions("
+                "user_id,full_name,username,status,quote_text,published_at,removal_token,"
+                "published_chat_id,published_message_ids,author_disclosure_consent"
+                ") VALUES(?,?,?,'published',?,?,?,?,?,1)",
+                (
+                    int(user_id), clean_name, clean_username, quote_text[:4000],
+                    published_at, removal_token, channel_id, json.dumps(message_ids),
+                ),
+            )
+            submission_id = int(cur.lastrowid)
+            if legacy_submission_id is not None:
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)",
+                    (f"backfill_legacy_submission_{int(legacy_submission_id)}", str(submission_id)),
+                )
+        return submission_id, True
+
     def removal_target(self, submission_id: int, token: str) -> sqlite3.Row | None:
         return self.conn.execute(
             "SELECT * FROM submissions "

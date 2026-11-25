@@ -155,7 +155,7 @@ class PaidPostBotTests(unittest.IsolatedAsyncioTestCase):
         rows = msg.answer.await_args.kwargs["reply_markup"].inline_keyboard
         self.assertEqual([row[0].text for row in rows], ["Удаление поста #99", "Инфа #99"])
 
-    async def test_forward_first_omits_info_without_consent(self):
+    async def test_forward_first_offers_info_without_consent(self):
         msg = fake_message(None)
         msg.forward_origin = SimpleNamespace(
             type="channel", chat=SimpleNamespace(id=-1001234567890), message_id=701
@@ -163,15 +163,19 @@ class PaidPostBotTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(app, "resolve_post_target", new=AsyncMock(return_value=fake_submission(0))):
             self.assertTrue(await app.offer_forwarded_post_actions(msg, AsyncMock()))
         rows = msg.answer.await_args.kwargs["reply_markup"].inline_keyboard
-        self.assertEqual([row[0].text for row in rows], ["Удаление поста #99"])
+        self.assertEqual([row[0].text for row in rows], ["Удаление поста #99", "Инфа #99"])
 
-    async def test_forwarded_info_invoice_requires_consent(self):
+    async def test_forwarded_info_invoice_does_not_require_consent(self):
         msg = fake_message()
-        with patch.object(app, "create_payment", new=AsyncMock()) as create:
-            self.assertFalse(await app.start_post_action_payment(
+        with patch.object(app, "ROLLYPAY_API_KEY", "test-key"), \
+             patch.object(app, "ROLLYPAY_TERMINAL_ID", "test-terminal"), \
+             patch.object(app, "create_payment", new=AsyncMock(return_value={
+                 "payment_id": "payment-forwarded-info", "pay_url": "https://example.test/pay"
+             })) as create, patch.object(app.db, "create_removal_payment"):
+            self.assertTrue(await app.start_post_action_payment(
                 msg, fake_submission(0), "author_lookup", from_forward=True
             ))
-        create.assert_not_awaited()
+        create.assert_awaited_once()
 
     async def test_removal_title_matches_invoice(self):
         msg = fake_message()

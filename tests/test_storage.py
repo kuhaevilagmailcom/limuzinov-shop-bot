@@ -95,6 +95,35 @@ class StorageTests(unittest.TestCase):
         self.assertIsNotNone(self.db.get(sid)["removed_at"])
         self.assertEqual(self.db.pending_removal_payments(), [])
 
+    def test_historical_publication_import_is_idempotent(self):
+        sid, created = self.db.import_published_submission(
+            user_id=777,
+            full_name="Старый автор",
+            username="old_author",
+            published_chat_id=-100123,
+            published_message_ids=[902, 901, 902],
+            quote_text="Старый пост",
+            published_at="2025-01-02 03:04:05",
+            removal_token="legacy-token",
+            legacy_submission_id=55,
+        )
+        self.assertTrue(created)
+        restored = self.db.find_published_submission(-100123, 901)
+        self.assertEqual(restored["id"], sid)
+        self.assertEqual(restored["user_id"], 777)
+        self.assertEqual(restored["published_message_ids"], "[901, 902]")
+        self.assertEqual(restored["author_disclosure_consent"], 1)
+
+        same_sid, created_again = self.db.import_published_submission(
+            user_id=777,
+            full_name="Старый автор",
+            username="old_author",
+            published_chat_id=-100123,
+            published_message_ids=[901, 902],
+        )
+        self.assertFalse(created_again)
+        self.assertEqual(same_sid, sid)
+
 
     def test_unpaid_published_post_remains_payable_after_reopen(self):
         sid, _ = self.db.add(
