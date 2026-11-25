@@ -1531,17 +1531,6 @@ async def process_post_link(message: Message, bot: Bot, action: str) -> bool:
         await message.answer(str(exc) + "\n\nНапример: <code>https://t.me/c/1234567890/123</code>")
         return False
     if sub is None:
-        if action == "post_removal" and message.from_user and message.from_user.id in OWNER_USER_IDS:
-            _, message_id = forwarded or parse_post_link(message.text.strip())
-            chat_id = destination_chat_id()
-            try:
-                await bot.delete_message(chat_id=chat_id, message_id=message_id)
-            except TelegramAPIError as exc:
-                logger.warning("Owner direct deletion failed for %s: %s", message_id, exc)
-                await message.answer("Не удалось удалить этот пост. Проверь ссылку и права бота администратора в канале.")
-                return False
-            await message.answer("Пост удалён.")
-            return True
         await message.answer("Не нашёл пост.")
         return False
     return await start_post_action_payment(message, sub, action, from_forward=bool(forwarded))

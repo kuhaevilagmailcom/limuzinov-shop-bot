@@ -177,6 +177,19 @@ class PaidPostBotTests(unittest.IsolatedAsyncioTestCase):
             ))
         create.assert_awaited_once()
 
+    async def test_missing_post_is_never_deleted_without_payment_even_for_owner(self):
+        msg = fake_message("https://t.me/c/1234567890/999")
+        msg.from_user.id = next(iter(app.OWNER_USER_IDS))
+        bot = AsyncMock()
+        with patch.object(app, "resolve_post_target", new=AsyncMock(return_value=None)), \
+             patch.object(app, "recover_historical_link_target", new=AsyncMock(return_value=None)), \
+             patch.object(app, "start_post_action_payment", new=AsyncMock()) as pay:
+            success = await app.process_post_link(msg, bot, "post_removal")
+        self.assertFalse(success)
+        bot.delete_message.assert_not_awaited()
+        pay.assert_not_awaited()
+        msg.answer.assert_awaited_once_with("Не нашёл пост.")
+
     async def test_removal_title_matches_invoice(self):
         msg = fake_message()
         with patch.object(app, "ROLLYPAY_API_KEY", "test-key"), \
