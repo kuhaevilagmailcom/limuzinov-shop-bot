@@ -1316,9 +1316,6 @@ async def start_post_action_payment(message: Message, sub, action: str, *, buyer
     if action not in {"post_removal", "author_lookup"}:
         await message.answer("Неизвестное действие. Выбери кнопку ещё раз.")
         return False
-    if from_forward and action == "author_lookup" and not sub["author_disclosure_consent"]:
-        await message.answer("Информация об авторе доступна только с его согласия.")
-        return False
     if not ROLLYPAY_API_KEY or not ROLLYPAY_TERMINAL_ID:
         await message.answer("Оплата RollyPay пока не настроена. Обратись к администратору.")
         return False
@@ -1470,11 +1467,10 @@ async def offer_forwarded_post_actions(message: Message, bot: Bot) -> bool:
         text=post_action_title("post_removal", sid),
         callback_data=f"postforward:post_removal:{channel}:{message_id}",
     )]]
-    if sub["author_disclosure_consent"]:
-        rows.append([InlineKeyboardButton(
-            text=post_action_title("author_lookup", sid),
-            callback_data=f"postforward:author_lookup:{channel}:{message_id}",
-        )])
+    rows.append([InlineKeyboardButton(
+        text=post_action_title("author_lookup", sid),
+        callback_data=f"postforward:author_lookup:{channel}:{message_id}",
+    )])
     await message.answer(
         "Выбери действие:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
@@ -1496,9 +1492,6 @@ async def forwarded_post_action(callback: CallbackQuery, bot: Bot) -> None:
         return
     if not sub or sub["removed_at"]:
         await callback.answer("Публикация не найдена или уже удалена.", show_alert=True)
-        return
-    if action == "author_lookup" and not sub["author_disclosure_consent"]:
-        await callback.answer("Информация об авторе доступна только с его согласия.", show_alert=True)
         return
     await callback.answer()
     if await start_post_action_payment(callback.message, sub, action, buyer=callback.from_user, from_forward=True):
@@ -1610,10 +1603,7 @@ async def reconcile_removal_payments(bot: Bot) -> None:
                         db.set_removal_payment_status(payment_id, "processing")
                         action = str(payment["action"] or "post_removal")
                         if action == "author_lookup":
-                            if str(payment["order_id"]).startswith("postinfofwd-") and not payment["author_disclosure_consent"]:
-                                await safe_notify(bot, int(payment["buyer_user_id"]), "Согласие автора отозвано. Обратитесь к администратору за возвратом оплаты.")
-                            else:
-                                await deliver_author_info(bot, payment)
+                            await deliver_author_info(bot, payment)
                             db.set_removal_payment_status(payment_id, "paid")
                         elif action == "post_removal":
                             if payment["removed_at"]:
