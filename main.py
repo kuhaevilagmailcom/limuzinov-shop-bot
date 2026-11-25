@@ -1067,7 +1067,7 @@ async def configure_commands(bot: Bot) -> None:
 
     start_command = [
         BotCommand(command="start", description="Отправить предложение"),
-        BotCommand(command="deletepost", description="Удалить пост по ссылке"),
+        BotCommand(command="deletepost", description="Удалить пост по ссылке или пересылке"),
         BotCommand(command="who", description="Узнать автора по ссылке"),
         BotCommand(command="cancel", description="Отменить выбор действия"),
         BotCommand(command="help", description="Помощь"),
@@ -1277,8 +1277,28 @@ def author_info_price_rub() -> int:
         return DEFAULT_AUTHOR_INFO_PRICE_RUB
 
 
-async def start_post_action_payment(message: Message, sub, action: str) -> bool:
+def post_action_title(action: str, submission_id: int) -> str:
+    return f"{'Удаление поста' if action == 'post_removal' else 'Инфа'} #{submission_id}"
+
+
+def forwarded_channel_post(message: Message) -> tuple[int, int] | None:
+    """Only trust Telegram's channel origin, not copied text or sender names."""
+    origin = getattr(message, "forward_origin", None)
+    if origin is None or getattr(origin, "type", None) != "channel":
+        return None
+    chat = getattr(origin, "chat", None)
+    chat_id = getattr(chat, "id", None)
+    message_id = getattr(origin, "message_id", None)
+    if not isinstance(chat_id, int) or not isinstance(message_id, int) or message_id <= 0:
+        return None
+    return chat_id, message_id
+
+
+async def start_post_action_payment(message: Message, sub, action: str, *, buyer=None) -> bool:
     """Create a fresh invoice for a verified tracked post."""
+    buyer = buyer or message.from_user
+    if not buyer or buyer.is_bot:
+        return False
     if not sub:
         await message.answer(
             "Не нашёл эту публикацию в базе. Ссылки из других каналов не принимаются."
@@ -1303,25 +1323,25 @@ async def start_post_action_payment(message: Message, sub, action: str) -> bool:
     amount = removal_price_rub() if action == "post_removal" else author_info_price_rub()
     prefix = "postrm" if action == "post_removal" else "postinfo"
     db.register_user(
-        message.from_user.id,
-        getattr(message.from_user, "username", None),
-        getattr(message.from_user, "full_name", "Пользователь"),
+        buyer.id,
+        getattr(buyer, "username", None),
+        getattr(buyer, "full_name", "Пользователь"),
     )
     order_id = f"{prefix}-{int(sub['id'])}-{uuid4().hex[:16]}"
-    title = "Удаление поста" if action == "post_removal" else "Автор публикации"
+    title = post_action_title(action, int(sub["id"]))
     metadata = {
         "action": action,
         "submission_id": str(sub["id"]),
         "chat_id": str(sub["published_chat_id"]),
         "message_ids": message_ids,
-        "buyer_user_id": str(message.from_user.id),
+        "buyer_user_id": str(buyer.id),
     }
     try:
         payment = await create_payment(
             api_base=ROLLYPAY_API_BASE, api_key=ROLLYPAY_API_KEY,
             terminal_id=ROLLYPAY_TERMINAL_ID, order_id=order_id,
-            amount=Decimal(amount), description=f"{title} #{int(sub['id'])}",
-            customer_id=str(message.from_user.id), metadata=metadata,
+            amount=Decimal(amount), description=title,
+            customer_id=str(buyer.id), metadata=metadata,
             test=ROLLYPAY_TEST_MODE,
             # Payment fulfillment is polled by the bot independently of the VPN site.
             success_url=f"https://t.me/{PUBLIC_BOT_USERNAME}",
@@ -1329,20 +1349,14 @@ async def start_post_action_payment(message: Message, sub, action: str) -> bool:
         )
         db.create_removal_payment(
             str(payment["payment_id"]), order_id, int(sub["id"]),
-            message.from_user.id, amount, action=action,
+            buyer.id, amount, action=action,
         )
     except (RollyPayError, KeyError, ValueError) as exc:
         logger.warning("Could not create paid post action: %s", exc)
         await message.answer("Не удалось создать оплату. Попробуй ещё раз.")
         return False
 
-    text = (
-        "Публикация найдена.\n"
-        f"Стоимость получения информации: <b>{amount} ₽</b>\n"
-        "Оплата через RollyPay"
-        if action == "author_lookup" else
-        f"<b>Удаление поста #{int(sub['id'])}</b>\n\nСтоимость: <b>{amount} ₽</b>"
-    )
+    text = f"<b>{title}</b>\n\nСтоимость: <b>{amount} ₽</b>"
     await message.answer(
         text,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
@@ -1366,6 +1380,10 @@ async def start_removal_payment(message: Message, submission_id: int, token: str
 
 async def resolve_post_from_link(bot: Bot, raw: str):
     channel, message_id = parse_post_link(raw)
+    return await resolve_post_target(bot, channel, message_id)
+
+
+async def resolve_post_target(bot: Bot, channel: str, message_id: int):
     configured = destination_chat_id()
     if configured is None:
         raise InvalidPostLink("Администратор ещё не настроил канал для публикаций.")
@@ -1386,7 +1404,7 @@ async def resolve_post_from_link(bot: Bot, raw: str):
     else:
         actual_chat_id = int(channel)
     if int(actual_chat_id) != int(expected_chat_id):
-        raise InvalidPostLink("Пришли ссылку на пост именно из нашего канала.")
+        raise InvalidPostLink("Пришли ссылку или перешли пост именно из нашего канала.")
 
     original_config = destination_chat_value()
     stored_alias = str(original_config) if original_config is not None else ""
@@ -1396,17 +1414,24 @@ async def resolve_post_from_link(bot: Bot, raw: str):
 
 
 async def process_post_link(message: Message, bot: Bot, action: str) -> bool:
-    if not message.text:
-        await message.answer("Пришли текстовую ссылку на публикацию из канала.")
+    forwarded = forwarded_channel_post(message)
+    if not forwarded and not message.text:
+        await message.answer("Пришли ссылку или перешли оригинальный пост из канала.")
         return False
     try:
-        sub = await resolve_post_from_link(bot, message.text.strip())
+        if forwarded:
+            channel, message_id = forwarded
+            sub = await resolve_post_target(bot, str(channel), message_id)
+        elif getattr(message, "forward_origin", None) is not None:
+            raise InvalidPostLink("Нужна оригинальная пересылка из канала.")
+        else:
+            sub = await resolve_post_from_link(bot, message.text.strip())
     except InvalidPostLink as exc:
         await message.answer(str(exc) + "\n\nНапример: <code>https://t.me/c/1234567890/123</code>")
         return False
     if sub is None:
         if action == "post_removal" and message.from_user and message.from_user.id in OWNER_USER_IDS:
-            _, message_id = parse_post_link(message.text.strip())
+            _, message_id = forwarded or parse_post_link(message.text.strip())
             chat_id = destination_chat_id()
             try:
                 await bot.delete_message(chat_id=chat_id, message_id=message_id)
@@ -1421,7 +1446,64 @@ async def process_post_link(message: Message, bot: Bot, action: str) -> bool:
             "Если пост старый, данные о нём могли не сохраниться после пересборки."
         )
         return False
+    if forwarded and action == "author_lookup" and not sub["author_disclosure_consent"]:
+        await message.answer("Информация об авторе доступна только с его согласия.")
+        return False
     return await start_post_action_payment(message, sub, action)
+
+
+async def offer_forwarded_post_actions(message: Message, bot: Bot) -> bool:
+    forwarded = forwarded_channel_post(message)
+    if not forwarded:
+        return False
+    channel, message_id = forwarded
+    try:
+        sub = await resolve_post_target(bot, str(channel), message_id)
+    except InvalidPostLink:
+        # Forwards from other channels remain ordinary suggestions.
+        return False
+    if not sub or sub["removed_at"]:
+        await message.answer("Публикация не найдена или уже удалена.")
+        return True
+    sid = int(sub["id"])
+    rows = [[InlineKeyboardButton(
+        text=post_action_title("post_removal", sid),
+        callback_data=f"postforward:post_removal:{channel}:{message_id}",
+    )]]
+    if sub["author_disclosure_consent"]:
+        rows.append([InlineKeyboardButton(
+            text=post_action_title("author_lookup", sid),
+            callback_data=f"postforward:author_lookup:{channel}:{message_id}",
+        )])
+    await message.answer(
+        "Выбери действие:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+    return True
+
+
+@router.callback_query(F.data.startswith("postforward:"), F.message.chat.type == "private")
+async def forwarded_post_action(callback: CallbackQuery, bot: Bot) -> None:
+    match = re.fullmatch(r"postforward:(post_removal|author_lookup):(-[0-9]+):([1-9][0-9]*)", callback.data or "")
+    if not match or not isinstance(callback.message, Message):
+        await callback.answer("Некорректная публикация.", show_alert=True)
+        return
+    action, channel, message_id = match.groups()
+    try:
+        sub = await resolve_post_target(bot, channel, int(message_id))
+    except InvalidPostLink as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    if not sub or sub["removed_at"]:
+        await callback.answer("Публикация не найдена или уже удалена.", show_alert=True)
+        return
+    if action == "author_lookup" and not sub["author_disclosure_consent"]:
+        await callback.answer("Информация об авторе доступна только с его согласия.", show_alert=True)
+        return
+    await callback.answer()
+    if await start_post_action_payment(callback.message, sub, action, buyer=callback.from_user):
+        db.clear_post_action(callback.from_user.id)
+
 
 async def delete_published_submission(bot: Bot, sub, message_ids: list[int]) -> bool:
     chat_id = parse_chat_id(sub["published_chat_id"])
@@ -1732,9 +1814,9 @@ async def help_command(message: Message, bot: Bot) -> None:
             message,
             "ℹ️ <b>Доступные команды</b>\n"
             "/start — отправить предложение\n"
-            "/deletepost — удалить пост по ссылке после оплаты\n"
+            "/deletepost — удалить пост по ссылке или пересылке после оплаты\n"
             "/who — узнать автора публикации после оплаты\n"
-            "/cancel — отменить ожидание ссылки\n"
+            "/cancel — отменить ожидание публикации\n"
             "/help — показать эту справку",
             reply_markup=POST_ACTION_KEYBOARD,
         )
@@ -1765,13 +1847,13 @@ async def post_action_command(message: Message) -> None:
     db.set_post_action(message.from_user.id, action)
     if action == "post_removal":
         await message.answer(
-            "Пришлите ссылку на публикацию из канала для удаления.\n"
+            "Пришлите ссылку или перешлите публикацию из канала для удаления.\n"
             "Пример: <code>https://t.me/c/1234567890/456</code>",
             reply_markup=POST_ACTION_KEYBOARD,
         )
         return
     await message.answer(
-        "Пришлите ссылку на публикацию из канала.\n"
+        "Пришлите ссылку или перешлите публикацию из канала.\n"
         "Пример: <code>https://t.me/c/1234567890/456</code>",
         reply_markup=POST_ACTION_KEYBOARD,
     )
@@ -1782,7 +1864,7 @@ async def post_action_cancel(message: Message) -> None:
     if message.from_user:
         db.clear_post_action(message.from_user.id)
     await message.answer(
-        "Ожидание ссылки отменено. Можешь отправить новый пост или выбрать кнопку.",
+        "Ожидание публикации отменено. Можешь отправить новый пост или выбрать кнопку.",
         reply_markup=POST_ACTION_KEYBOARD,
     )
 
@@ -2359,18 +2441,18 @@ async def inbox(message: Message, bot: Bot) -> None:
         )
 
     requested = (message.text or "").strip()
-    if requested in POST_ACTION_BUTTONS:
+    if requested in POST_ACTION_BUTTONS and getattr(message, "forward_origin", None) is None:
         action = POST_ACTION_BUTTONS[requested]
         db.set_post_action(sender_id, action)
         if action == "post_removal":
             await message.answer(
-                "Пришлите ссылку на публикацию из канала для удаления.\n"
+                "Пришлите ссылку или перешлите публикацию из канала для удаления.\n"
                 "Пример: <code>https://t.me/c/1234567890/456</code>",
                 reply_markup=POST_ACTION_KEYBOARD,
             )
             return
         await message.answer(
-            "Пришлите ссылку на публикацию из канала.\n"
+            "Пришлите ссылку или перешлите публикацию из канала.\n"
             "Пример: <code>https://t.me/c/1234567890/456</code>",
             reply_markup=POST_ACTION_KEYBOARD,
         )
@@ -2378,7 +2460,7 @@ async def inbox(message: Message, bot: Bot) -> None:
 
     waiting = db.get_post_action(sender_id)
     if waiting:
-        if requested.startswith(("https://t.me/", "https://telegram.me/")):
+        if getattr(message, "forward_origin", None) is not None or requested.startswith(("https://t.me/", "https://telegram.me/", "https://www.t.me/")):
             success = await process_post_link(message, bot, waiting)
             if success:
                 db.clear_post_action(sender_id)
@@ -2387,9 +2469,12 @@ async def inbox(message: Message, bot: Bot) -> None:
         # ordinary text or media in link-entry mode: send it to moderation normally.
         db.clear_post_action(sender_id)
 
-    if requested.startswith(("https://t.me/", "https://telegram.me/")):
+    if await offer_forwarded_post_actions(message, bot):
+        return
+
+    if requested.startswith(("https://t.me/", "https://telegram.me/", "https://www.t.me/")):
         await message.answer(
-            "Нажмите «Удалить пост» или «Узнать, кто выложил», затем отправьте ссылку.",
+            "Нажмите «Удалить пост» или «Узнать, кто выложил», затем отправьте ссылку или перешлите пост.",
             reply_markup=POST_ACTION_KEYBOARD,
         )
         return
