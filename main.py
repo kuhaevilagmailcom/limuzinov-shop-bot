@@ -1294,7 +1294,7 @@ def forwarded_channel_post(message: Message) -> tuple[int, int] | None:
     return chat_id, message_id
 
 
-async def start_post_action_payment(message: Message, sub, action: str, *, buyer=None) -> bool:
+async def start_post_action_payment(message: Message, sub, action: str, *, buyer=None, from_forward: bool = False) -> bool:
     """Create a fresh invoice for a verified tracked post."""
     buyer = buyer or message.from_user
     if not buyer or buyer.is_bot:
@@ -1316,12 +1316,15 @@ async def start_post_action_payment(message: Message, sub, action: str, *, buyer
     if action not in {"post_removal", "author_lookup"}:
         await message.answer("Неизвестное действие. Выбери кнопку ещё раз.")
         return False
+    if from_forward and action == "author_lookup" and not sub["author_disclosure_consent"]:
+        await message.answer("Информация об авторе доступна только с его согласия.")
+        return False
     if not ROLLYPAY_API_KEY or not ROLLYPAY_TERMINAL_ID:
         await message.answer("Оплата RollyPay пока не настроена. Обратись к администратору.")
         return False
 
     amount = removal_price_rub() if action == "post_removal" else author_info_price_rub()
-    prefix = "postrm" if action == "post_removal" else "postinfo"
+    prefix = "postrm" if action == "post_removal" else ("postinfofwd" if from_forward else "postinfo")
     db.register_user(
         buyer.id,
         getattr(buyer, "username", None),
@@ -1446,10 +1449,7 @@ async def process_post_link(message: Message, bot: Bot, action: str) -> bool:
             "Если пост старый, данные о нём могли не сохраниться после пересборки."
         )
         return False
-    if forwarded and action == "author_lookup" and not sub["author_disclosure_consent"]:
-        await message.answer("Информация об авторе доступна только с его согласия.")
-        return False
-    return await start_post_action_payment(message, sub, action)
+    return await start_post_action_payment(message, sub, action, from_forward=bool(forwarded))
 
 
 async def offer_forwarded_post_actions(message: Message, bot: Bot) -> bool:
@@ -1501,7 +1501,7 @@ async def forwarded_post_action(callback: CallbackQuery, bot: Bot) -> None:
         await callback.answer("Информация об авторе доступна только с его согласия.", show_alert=True)
         return
     await callback.answer()
-    if await start_post_action_payment(callback.message, sub, action, buyer=callback.from_user):
+    if await start_post_action_payment(callback.message, sub, action, buyer=callback.from_user, from_forward=True):
         db.clear_post_action(callback.from_user.id)
 
 
@@ -1610,7 +1610,10 @@ async def reconcile_removal_payments(bot: Bot) -> None:
                         db.set_removal_payment_status(payment_id, "processing")
                         action = str(payment["action"] or "post_removal")
                         if action == "author_lookup":
-                            await deliver_author_info(bot, payment)
+                            if str(payment["order_id"]).startswith("postinfofwd-") and not payment["author_disclosure_consent"]:
+                                await safe_notify(bot, int(payment["buyer_user_id"]), "Согласие автора отозвано. Обратитесь к администратору за возвратом оплаты.")
+                            else:
+                                await deliver_author_info(bot, payment)
                             db.set_removal_payment_status(payment_id, "paid")
                         elif action == "post_removal":
                             if payment["removed_at"]:
