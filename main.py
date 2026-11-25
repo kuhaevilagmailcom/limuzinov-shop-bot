@@ -1542,10 +1542,7 @@ async def process_post_link(message: Message, bot: Bot, action: str) -> bool:
                 return False
             await message.answer("Пост удалён.")
             return True
-        await message.answer(
-            "Не нашёл этот пост среди публикаций бота. Проверь ссылку. "
-            "Если пост старый, данные о нём могли не сохраниться после пересборки."
-        )
+        await message.answer("Не нашёл пост.")
         return False
     return await start_post_action_payment(message, sub, action, from_forward=bool(forwarded))
 
