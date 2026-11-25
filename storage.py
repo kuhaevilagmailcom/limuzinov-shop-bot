@@ -178,8 +178,6 @@ class Storage:
             );
             CREATE INDEX IF NOT EXISTS items_sub_id_idx ON items(submission_id);
             CREATE INDEX IF NOT EXISTS submissions_status_idx ON submissions(status);
-            CREATE INDEX IF NOT EXISTS submissions_publication_fingerprint_idx
-                ON submissions(publication_fingerprint);
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -275,10 +273,10 @@ class Storage:
             self.conn.execute(
                 "ALTER TABLE submissions ADD COLUMN publication_fingerprint TEXT NOT NULL DEFAULT ''"
             )
-            self.conn.execute(
-                "CREATE INDEX IF NOT EXISTS submissions_publication_fingerprint_idx "
-                "ON submissions(publication_fingerprint)"
-            )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS submissions_publication_fingerprint_idx "
+            "ON submissions(publication_fingerprint)"
+        )
         if "keyboard_cleaned" not in columns:
             self.conn.execute(
                 "ALTER TABLE submissions ADD COLUMN keyboard_cleaned INTEGER NOT NULL DEFAULT 0"

@@ -1,3 +1,4 @@
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -59,6 +60,36 @@ class ExportBackfillAndBackupTests(unittest.TestCase):
                 self.assertEqual(restored.user_count(), 1)
             finally:
                 restored.close()
+
+    def test_existing_database_is_migrated_before_fingerprint_index(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "legacy.sqlite3"
+            with sqlite3.connect(path) as connection:
+                connection.execute("""
+                    CREATE TABLE submissions (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id INTEGER NOT NULL,
+                        full_name TEXT NOT NULL,
+                        username TEXT,
+                        album_key TEXT,
+                        status TEXT NOT NULL DEFAULT 'collecting',
+                        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                        UNIQUE(user_id, album_key)
+                    )
+                """)
+                connection.execute(
+                    "INSERT INTO submissions(user_id,full_name,status) VALUES(123,'Legacy','published')"
+                )
+            connection.close()
+            db = Storage(str(path))
+            try:
+                columns = {row["name"] for row in db.conn.execute("PRAGMA table_info(submissions)")}
+                indexes = {row["name"] for row in db.conn.execute("PRAGMA index_list(submissions)")}
+                self.assertIn("publication_fingerprint", columns)
+                self.assertIn("submissions_publication_fingerprint_idx", indexes)
+                self.assertEqual(db.get(1)["full_name"], "Legacy")
+            finally:
+                db.close()
 
     def test_exported_post_is_idempotent_and_lazily_binds_real_id(self):
         with tempfile.TemporaryDirectory() as tmp:
