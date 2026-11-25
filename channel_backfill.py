@@ -10,6 +10,7 @@ import argparse
 import asyncio
 import os
 import re
+import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -167,13 +168,38 @@ def iso_utc(value: datetime | None) -> str | None:
     return value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def backup_database(database_path: str) -> Path:
+    source_path = Path(database_path).expanduser().resolve()
+    if not source_path.is_file():
+        raise FileNotFoundError(f"Database not found: {source_path}")
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup_path = source_path.with_name(f"{source_path.stem}.before-backfill-{stamp}.sqlite3")
+    with sqlite3.connect(str(source_path)) as source, sqlite3.connect(str(backup_path)) as destination:
+        source.backup(destination)
+    return backup_path
+
+
 async def run(args: argparse.Namespace) -> int:
     from telethon import TelegramClient
+    from telethon.sessions import StringSession
 
-    api_id = int(os.environ["TELEGRAM_API_ID"])
-    api_hash = os.environ["TELEGRAM_API_HASH"].strip()
-    client = TelegramClient(args.session, api_id, api_hash)
-    await client.start()
+    api_id_raw = os.getenv("POST_ADMIN_API_ID", "").strip() or os.getenv("TELEGRAM_API_ID", "").strip()
+    api_hash = os.getenv("POST_ADMIN_API_HASH", "").strip() or os.getenv("TELEGRAM_API_HASH", "").strip()
+    string_session = os.getenv("POST_ADMIN_SESSION", "").strip()
+    if not api_id_raw.isdigit() or not api_hash:
+        raise RuntimeError(
+            "Set POST_ADMIN_API_ID and POST_ADMIN_API_HASH (or TELEGRAM_API_ID/TELEGRAM_API_HASH)"
+        )
+    api_id = int(api_id_raw)
+    session = StringSession(string_session) if string_session else args.session
+    client = TelegramClient(session, api_id, api_hash, receive_updates=False)
+    if string_session:
+        await client.connect()
+        if not await client.is_user_authorized():
+            await client.disconnect()
+            raise RuntimeError("POST_ADMIN_SESSION is not authorized")
+    else:
+        await client.start()
     try:
         moderation = await client.get_entity(entity_ref(args.moderation_channel))
         publication = await client.get_entity(entity_ref(args.publication_channel))
@@ -183,6 +209,9 @@ async def run(args: argparse.Namespace) -> int:
         if publication_chat_id > 0:
             publication_chat_id = int(f"-100{publication_chat_id}")
 
+        backup_path = None if args.dry_run else backup_database(args.db)
+        if backup_path is not None:
+            print(f"backup={backup_path}")
         storage = Storage(args.db)
         imported = existing = unmatched = 0
         try:
@@ -225,9 +254,22 @@ async def run(args: argparse.Namespace) -> int:
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description="Backfill historical Telegram publications into SQLite")
-    result.add_argument("--moderation-channel", required=True, help="Admin group/channel ID or @username")
-    result.add_argument("--publication-channel", required=True, help="Public channel ID or @username")
-    result.add_argument("--db", required=True, help="Path to the bot SQLite database")
+    default_db = resolve_database_path(
+        ROOT,
+        configured_path=os.getenv("DB_PATH", ""),
+        data_dir=os.getenv("DATA_DIR", "/app/data" if ROOT == Path("/app") else ""),
+    )
+    result.add_argument(
+        "--moderation-channel",
+        default=os.getenv("MODERATION_CHAT_ID", "").strip() or "-5106639548",
+        help="Admin group/channel ID or @username; defaults to MODERATION_CHAT_ID",
+    )
+    result.add_argument(
+        "--publication-channel",
+        default=(os.getenv("DESTINATION_CHAT_ID", "").strip() or os.getenv("CHANNEL_ID", "").strip()),
+        help="Public channel ID or @username; defaults to DESTINATION_CHAT_ID/CHANNEL_ID",
+    )
+    result.add_argument("--db", default=default_db, help="SQLite path; defaults to DB_PATH/DATA_DIR")
     result.add_argument("--session", default=str(ROOT / "channel_backfill"), help="Local Telethon session path")
     result.add_argument("--dry-run", action="store_true", help="Scan and report without changing SQLite")
     return result
@@ -237,7 +279,10 @@ def main() -> int:
     from dotenv import load_dotenv
 
     load_dotenv(ROOT / ".env")
-    return asyncio.run(run(parser().parse_args()))
+    args = parser().parse_args()
+    if not args.publication_channel:
+        raise SystemExit("DESTINATION_CHAT_ID is not configured")
+    return asyncio.run(run(args))
 
 
 if __name__ == "__main__":

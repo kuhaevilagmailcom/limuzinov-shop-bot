@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 from uuid import uuid4
 
 import httpx
@@ -67,3 +67,25 @@ async def get_payment(*, api_base: str, api_key: str, payment_id: str) -> dict:
     return await _request(
         api_base, api_key, "GET", f"/api/v1/payments/{quote(payment_id, safe='')}"
     )
+
+
+async def get_balance(*, api_base: str, api_key: str, terminal_id: str = "") -> dict:
+    query = f"?{urlencode({'terminal_id': terminal_id})}" if terminal_id else ""
+    return await _request(api_base, api_key, "GET", f"/api/v1/balance{query}")
+
+
+async def get_rate(*, api_base: str, api_key: str, terminal_id: str = "") -> dict:
+    query = f"?{urlencode({'terminal_id': terminal_id})}" if terminal_id else ""
+    return await _request(api_base, api_key, "GET", f"/api/v1/rate{query}")
+
+
+async def list_payments(
+    *, api_base: str, api_key: str, terminal_id: str = "", status: str = ""
+) -> dict:
+    params = {}
+    if terminal_id:
+        params["terminal_id"] = terminal_id
+    if status:
+        params["status"] = status
+    query = f"?{urlencode(params)}" if params else ""
+    return await _request(api_base, api_key, "GET", f"/api/v1/payments{query}")

@@ -7,7 +7,68 @@ import secrets
 import sqlite3
 import time
 from contextlib import closing
+from datetime import datetime, timezone
 from pathlib import Path
+
+
+def create_database_backup(
+    database_path: str | Path,
+    *,
+    backup_dir: str | Path | None = None,
+    keep: int = 30,
+    label: str = "auto",
+) -> Path | None:
+    """Create a transactionally consistent rotating SQLite backup."""
+    source_path = Path(database_path).expanduser().resolve()
+    if not source_path.is_file() or source_path.stat().st_size == 0:
+        return None
+    destination_dir = (
+        Path(backup_dir).expanduser().resolve()
+        if backup_dir
+        else source_path.parent / "backups"
+    )
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+    destination = destination_dir / f"{source_path.stem}-{label}-{stamp}.sqlite3"
+    with closing(sqlite3.connect(str(source_path))) as source:
+        with closing(sqlite3.connect(str(destination))) as target:
+            source.backup(target)
+            check = target.execute("PRAGMA quick_check").fetchone()
+            if not check or check[0] != "ok":
+                raise sqlite3.DatabaseError(f"Backup integrity check failed: {destination}")
+    backups = sorted(
+        destination_dir.glob(f"{source_path.stem}-*.sqlite3"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for stale in backups[max(1, int(keep)):]:
+        stale.unlink(missing_ok=True)
+    return destination
+
+
+def restore_latest_database_backup(database_path: str | Path) -> Path | None:
+    """Restore the newest valid local backup when the primary file vanished."""
+    target_path = Path(database_path).expanduser().resolve()
+    if target_path.is_file() and target_path.stat().st_size > 0:
+        return None
+    backup_dir = target_path.parent / "backups"
+    candidates = sorted(
+        backup_dir.glob(f"{target_path.stem}-*.sqlite3"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for candidate in candidates:
+        try:
+            with closing(sqlite3.connect(str(candidate))) as source:
+                check = source.execute("PRAGMA quick_check").fetchone()
+                if not check or check[0] != "ok":
+                    continue
+                with closing(sqlite3.connect(str(target_path))) as target:
+                    source.backup(target)
+            return candidate
+        except sqlite3.DatabaseError:
+            target_path.unlink(missing_ok=True)
+    return None
 
 
 def resolve_database_path(
@@ -18,7 +79,11 @@ def resolve_database_path(
 ) -> str:
     """Use BotHost's persistent data volume; migrate legacy DB with SQLite backup."""
     if configured_path.strip():
-        return configured_path.strip()
+        configured = configured_path.strip()
+        target = Path(configured).expanduser()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        restore_latest_database_backup(target)
+        return configured
     legacy = project_dir / "suggestions.sqlite3"
     if not data_dir.strip():
         return str(legacy)
@@ -35,6 +100,8 @@ def resolve_database_path(
         with closing(sqlite3.connect(str(legacy))) as source:
             with closing(sqlite3.connect(str(target))) as destination:
                 source.backup(destination)
+
+    restore_latest_database_backup(target)
 
     return str(target)
 
@@ -86,6 +153,7 @@ class Storage:
                 admin_card_id INTEGER,
                 admin_card_mode TEXT NOT NULL DEFAULT 'content',
                 quote_text TEXT NOT NULL DEFAULT '',
+                publication_fingerprint TEXT NOT NULL DEFAULT '',
                 keyboard_cleaned INTEGER NOT NULL DEFAULT 0,
                 reviewed_by_id INTEGER,
                 reviewed_by_name TEXT,
@@ -110,6 +178,8 @@ class Storage:
             );
             CREATE INDEX IF NOT EXISTS items_sub_id_idx ON items(submission_id);
             CREATE INDEX IF NOT EXISTS submissions_status_idx ON submissions(status);
+            CREATE INDEX IF NOT EXISTS submissions_publication_fingerprint_idx
+                ON submissions(publication_fingerprint);
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -201,6 +271,14 @@ class Storage:
             )
         if "quote_text" not in columns:
             self.conn.execute("ALTER TABLE submissions ADD COLUMN quote_text TEXT NOT NULL DEFAULT ''")
+        if "publication_fingerprint" not in columns:
+            self.conn.execute(
+                "ALTER TABLE submissions ADD COLUMN publication_fingerprint TEXT NOT NULL DEFAULT ''"
+            )
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS submissions_publication_fingerprint_idx "
+                "ON submissions(publication_fingerprint)"
+            )
         if "keyboard_cleaned" not in columns:
             self.conn.execute(
                 "ALTER TABLE submissions ADD COLUMN keyboard_cleaned INTEGER NOT NULL DEFAULT 0"
@@ -465,15 +543,34 @@ class Storage:
         published_at: str | None = None,
         removal_token: str | None = None,
         legacy_submission_id: int | None = None,
+        publication_fingerprint: str = "",
     ) -> tuple[int, bool]:
         """Idempotently restore a historical channel post into the live database."""
         message_ids = sorted({int(value) for value in published_message_ids if int(value) > 0})
-        if not message_ids:
-            raise ValueError("At least one published message id is required")
+        clean_fingerprint = publication_fingerprint.strip().lower()
+        if not message_ids and not clean_fingerprint:
+            raise ValueError("A published message id or publication fingerprint is required")
         channel_id = str(published_chat_id)
 
         for message_id in message_ids:
             existing = self.find_published_submission(channel_id, message_id)
+            if existing:
+                return int(existing["id"]), False
+
+        if legacy_submission_id is not None:
+            setting = self.conn.execute(
+                "SELECT value FROM settings WHERE key=?",
+                (f"backfill_legacy_submission_{int(legacy_submission_id)}",),
+            ).fetchone()
+            if setting and str(setting["value"]).isdigit():
+                return int(setting["value"]), False
+
+        if clean_fingerprint:
+            existing = self.conn.execute(
+                "SELECT id FROM submissions WHERE user_id=? AND publication_fingerprint=? "
+                "AND status='published' ORDER BY id DESC LIMIT 1",
+                (int(user_id), clean_fingerprint),
+            ).fetchone()
             if existing:
                 return int(existing["id"]), False
 
@@ -490,11 +587,12 @@ class Storage:
             )
             cur = self.conn.execute(
                 "INSERT INTO submissions("
-                "user_id,full_name,username,status,quote_text,published_at,removal_token,"
+                "user_id,full_name,username,status,quote_text,publication_fingerprint,"
+                "published_at,removal_token,"
                 "published_chat_id,published_message_ids,author_disclosure_consent"
-                ") VALUES(?,?,?,'published',?,?,?,?,?,1)",
+                ") VALUES(?,?,?,'published',?,?,?,?,?,?,1)",
                 (
-                    int(user_id), clean_name, clean_username, quote_text[:4000],
+                    int(user_id), clean_name, clean_username, quote_text[:4000], clean_fingerprint,
                     published_at, removal_token, channel_id, json.dumps(message_ids),
                 ),
             )
@@ -505,6 +603,36 @@ class Storage:
                     (f"backfill_legacy_submission_{int(legacy_submission_id)}", str(submission_id)),
                 )
         return submission_id, True
+
+    def find_published_submission_by_fingerprint(self, fingerprint: str) -> sqlite3.Row | None:
+        """Return a historical post only when the text identifies one row unambiguously."""
+        value = fingerprint.strip().lower()
+        if not value:
+            return None
+        rows = list(self.conn.execute(
+            "SELECT * FROM submissions WHERE publication_fingerprint=? "
+            "AND status='published' AND removed_at IS NULL ORDER BY id DESC LIMIT 2",
+            (value,),
+        ))
+        return rows[0] if len(rows) == 1 else None
+
+    def attach_publication_message(
+        self, submission_id: int, chat_id: int | str, message_id: int
+    ) -> None:
+        """Lazily bind a real channel message id recovered from a forward/link."""
+        row = self.get(submission_id)
+        if not row:
+            raise ValueError("Submission not found")
+        try:
+            message_ids = [int(value) for value in json.loads(row["published_message_ids"] or "[]")]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            message_ids = []
+        if int(message_id) not in message_ids:
+            message_ids.append(int(message_id))
+        self.set_publication(submission_id, chat_id, sorted(set(message_ids)))
+
+    def backup(self, *, backup_dir: str | Path | None = None, keep: int = 30) -> Path | None:
+        return create_database_backup(self.conn.execute("PRAGMA database_list").fetchone()[2], backup_dir=backup_dir, keep=keep)
 
     def removal_target(self, submission_id: int, token: str) -> sqlite3.Row | None:
         return self.conn.execute(

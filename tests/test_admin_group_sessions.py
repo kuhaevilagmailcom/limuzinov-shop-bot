@@ -79,6 +79,7 @@ class AdminGroupSessionTests(unittest.IsolatedAsyncioTestCase):
     async def test_admin_menu_uses_telegram_custom_emoji_button_icons(self):
         keyboard = app.admin_menu_keyboard()
         buttons = [button for row in keyboard.inline_keyboard for button in row]
+        self.assertIn("RollyPay", [button.text for button in buttons])
         self.assertTrue(all(button.icon_custom_emoji_id for button in buttons))
         self.assertTrue(all(not button.text.startswith(("🎁", "🎟", "📢", "📨", "📊", "🏆", "💳", "💸", "👥", "📈")) for button in buttons))
 
@@ -87,3 +88,18 @@ class AdminGroupSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Бот перезапущен", notice)
         self.assertRegex(notice, r"Магнитогорск: <b>\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}</b>")
         self.assertTrue(notice.endswith("Позор МГН крутой бот, йоу"))
+
+    async def test_rollypay_admin_card_shows_live_balance_and_counts(self):
+        with patch.object(app, "ROLLYPAY_API_KEY", "key"), \
+             patch.object(app, "ROLLYPAY_TERMINAL_ID", "terminal-1234567890"), \
+             patch.object(app, "get_balance", new=AsyncMock(return_value={
+                 "terminal_id": "terminal-1234567890", "available_usdt": "12.50", "hold_usdt": "1.25"
+             })), \
+             patch.object(app, "get_rate", new=AsyncMock(return_value={"rate": "100.00"})), \
+             patch.object(app, "list_rollypay_payments", new=AsyncMock(side_effect=[
+                 {"items": [], "total": 9}, {"items": [], "total": 6}
+             ])):
+            card = await app.rollypay_admin_card()
+        self.assertIn("12.50 USDT", card)
+        self.assertIn("1250.00 ₽", card)
+        self.assertIn("оплачено: <b>6</b>", card)

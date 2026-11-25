@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -36,11 +37,22 @@ from aiogram.types import (
     ReplyParameters,
     ReplyKeyboardRemove,
 )
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    def load_dotenv(*_args, **_kwargs) -> bool:
+        return False
 
 from storage import Storage, resolve_database_path
-from payments import RollyPayError, create_payment, get_payment
-from post_lookup import InvalidPostLink, parse_post_link
+from payments import (
+    RollyPayError,
+    create_payment,
+    get_balance,
+    get_payment,
+    get_rate,
+    list_payments as list_rollypay_payments,
+)
+from post_lookup import InvalidPostLink, parse_post_link, publication_text_fingerprint
 
 ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
@@ -116,6 +128,30 @@ USERS_PAGE_SIZE = 10
 PAYMENTS_PAGE_SIZE = 8
 resolved_destination_chat_id: int | None = None
 resolved_moderation_chat_id: int | None = None
+
+
+def positive_int_env(name: str, default: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+DB_BACKUP_INTERVAL_SECONDS = positive_int_env("DB_BACKUP_INTERVAL_SECONDS", 6 * 60 * 60)
+DB_BACKUP_KEEP = positive_int_env("DB_BACKUP_KEEP", 30)
+
+
+async def database_backup_loop() -> None:
+    """Keep rotating SQLite snapshots on the persistent data volume."""
+    while True:
+        await asyncio.sleep(DB_BACKUP_INTERVAL_SECONDS)
+        try:
+            backup = db.backup(keep=DB_BACKUP_KEEP)
+            if backup:
+                logger.info("Database backup created: %s", backup)
+        except (OSError, sqlite3.DatabaseError) as exc:
+            logger.error("Database backup failed: %s", exc)
 
 
 def parse_chat_id(value: str | int | None) -> str | int | None:
@@ -1383,6 +1419,66 @@ async def resolve_post_from_link(bot: Bot, raw: str):
     return await resolve_post_target(bot, channel, message_id)
 
 
+def historical_post_fingerprint(message: Message) -> str:
+    return publication_text_fingerprint(
+        getattr(message, "text", None) or getattr(message, "caption", None) or ""
+    )
+
+
+def bind_historical_forward(message: Message, channel: int, message_id: int):
+    """Match an exported post by content and remember its real Telegram id."""
+    fingerprint = historical_post_fingerprint(message)
+    sub = db.find_published_submission_by_fingerprint(fingerprint)
+    if sub:
+        db.attach_publication_message(int(sub["id"]), channel, message_id)
+    return sub
+
+
+async def recover_historical_link_target(
+    request: Message, bot: Bot, channel: str, message_id: int
+):
+    """Resolve a link-only old post through a short-lived verified forward.
+
+    Bot API has no get-message endpoint.  Forwarding to the requesting member,
+    fingerprinting the returned Message, and deleting it immediately is the only
+    Bot API-only way to inspect an old channel post without MTProto credentials.
+    """
+    configured = destination_chat_id()
+    if configured is None or not request.from_user or not request.chat:
+        return None
+    is_public = isinstance(destination_chat_value(), str) and str(destination_chat_value()).startswith("@")
+    if not is_public:
+        try:
+            member = await bot.get_chat_member(configured, request.from_user.id)
+            status = str(getattr(member, "status", "")).split(".")[-1].lower()
+            if status in {"left", "kicked", "banned"}:
+                return None
+        except TelegramAPIError:
+            return None
+    temporary = None
+    try:
+        temporary = await bot.forward_message(
+            chat_id=request.chat.id,
+            from_chat_id=configured,
+            message_id=message_id,
+            disable_notification=True,
+        )
+        if isinstance(configured, int):
+            source_chat_id = configured
+        else:
+            source_chat_id = int((await bot.get_chat(configured)).id)
+        return bind_historical_forward(temporary, source_chat_id, message_id)
+    except (AttributeError, TelegramAPIError) as exc:
+        logger.info("Could not inspect historical publication %s/%s: %s", channel, message_id, exc)
+        return None
+    finally:
+        if temporary is not None:
+            try:
+                await bot.delete_message(request.chat.id, temporary.message_id)
+            except TelegramAPIError:
+                pass
+
+
 async def resolve_post_target(bot: Bot, channel: str, message_id: int):
     configured = destination_chat_id()
     if configured is None:
@@ -1422,10 +1518,15 @@ async def process_post_link(message: Message, bot: Bot, action: str) -> bool:
         if forwarded:
             channel, message_id = forwarded
             sub = await resolve_post_target(bot, str(channel), message_id)
+            if sub is None:
+                sub = bind_historical_forward(message, channel, message_id)
         elif getattr(message, "forward_origin", None) is not None:
             raise InvalidPostLink("Нужна оригинальная пересылка из канала.")
         else:
-            sub = await resolve_post_from_link(bot, message.text.strip())
+            channel, message_id = parse_post_link(message.text.strip())
+            sub = await resolve_post_target(bot, channel, message_id)
+            if sub is None:
+                sub = await recover_historical_link_target(message, bot, channel, message_id)
     except InvalidPostLink as exc:
         await message.answer(str(exc) + "\n\nНапример: <code>https://t.me/c/1234567890/123</code>")
         return False
@@ -1456,6 +1557,8 @@ async def offer_forwarded_post_actions(message: Message, bot: Bot) -> bool:
     channel, message_id = forwarded
     try:
         sub = await resolve_post_target(bot, str(channel), message_id)
+        if sub is None:
+            sub = bind_historical_forward(message, channel, message_id)
     except InvalidPostLink:
         # Forwards from other channels remain ordinary suggestions.
         return False
@@ -1990,6 +2093,63 @@ def payments_page_keyboard(status_filter: str = "all", page: int = 0) -> InlineK
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def rollypay_admin_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Обновить", callback_data="gadmin:rollypay")],
+        [InlineKeyboardButton(text="↩️ Админ-меню", callback_data="gadmin:menu")],
+    ])
+
+
+async def rollypay_admin_card() -> str:
+    if not ROLLYPAY_API_KEY:
+        return "💰 <b>RollyPay</b>\nAPI-ключ не настроен."
+    try:
+        balance, rate_data, all_payments, paid_payments = await asyncio.gather(
+            get_balance(
+                api_base=ROLLYPAY_API_BASE,
+                api_key=ROLLYPAY_API_KEY,
+                terminal_id=ROLLYPAY_TERMINAL_ID,
+            ),
+            get_rate(
+                api_base=ROLLYPAY_API_BASE,
+                api_key=ROLLYPAY_API_KEY,
+                terminal_id=ROLLYPAY_TERMINAL_ID,
+            ),
+            list_rollypay_payments(
+                api_base=ROLLYPAY_API_BASE,
+                api_key=ROLLYPAY_API_KEY,
+                terminal_id=ROLLYPAY_TERMINAL_ID,
+            ),
+            list_rollypay_payments(
+                api_base=ROLLYPAY_API_BASE,
+                api_key=ROLLYPAY_API_KEY,
+                terminal_id=ROLLYPAY_TERMINAL_ID,
+                status="paid",
+            ),
+        )
+        available = Decimal(str(balance.get("available_usdt", "0")))
+        hold = Decimal(str(balance.get("hold_usdt", "0")))
+        rate = Decimal(str(rate_data.get("rate", "0")))
+        total = int(all_payments.get("total", len(all_payments.get("items", []))))
+        paid = int(paid_payments.get("total", len(paid_payments.get("items", []))))
+    except (RollyPayError, InvalidOperation, TypeError, ValueError) as exc:
+        logger.warning("RollyPay admin summary failed: %s", exc)
+        return "💰 <b>RollyPay</b>\nНе удалось получить данные кассы. Попробуй обновить позже."
+    terminal = str(balance.get("terminal_id") or ROLLYPAY_TERMINAL_ID or "не указан")
+    if len(terminal) > 18:
+        terminal = terminal[:8] + "…" + terminal[-6:]
+    rub_estimate = available * rate
+    return (
+        "💰 <b>RollyPay</b>\n"
+        f"Доступно: <b>{available:.2f} USDT</b> ≈ <b>{rub_estimate:.2f} ₽</b>\n"
+        f"В удержании: <b>{hold:.2f} USDT</b>\n"
+        f"Курс: <b>{rate:.2f} ₽/USDT</b>\n"
+        f"Платежей в RollyPay: <b>{total}</b> · оплачено: <b>{paid}</b>\n"
+        f"Касса: <code>{html.escape(terminal)}</code>\n"
+        f"Режим: <b>{'тестовый' if ROLLYPAY_TEST_MODE else 'боевой'}</b>"
+    )
+
+
 @router.callback_query(F.data.startswith("gpay:"))
 async def payments_pagination_callback(callback: CallbackQuery, bot: Bot) -> None:
     if not callback.from_user or not callback.message or not callback.data:
@@ -2027,7 +2187,7 @@ def admin_menu_keyboard() -> InlineKeyboardMarkup:
         [button("Опубликовать в канал", "gadmin:publish", "check"), button("Разослать", "gadmin:broadcast", "chat")],
         [button("Статистика", "gadmin:stats", "info"), button("Подвести итоги", "gadmin:draw", "timer")],
         [button("Создать счёт", "gadmin:invoice", "check"), button("Цены услуг", "gadmin:prices", "info")],
-        [button("Платежи", "gadmin:payments", "info")],
+        [button("RollyPay", "gadmin:rollypay", "info"), button("Платежи", "gadmin:payments", "info")],
         [button("Пользователи", "gadmin:users", "profile"), button("Топ модераторов", "gadmin:top", "info")],
     ])
 
@@ -2050,6 +2210,14 @@ async def giveaway_admin_callback(callback: CallbackQuery, bot: Bot) -> None:
     if action == "payments":
         await callback.answer()
         await callback.message.answer(render_payments_page(), reply_markup=payments_page_keyboard())
+        return
+    if action == "rollypay":
+        await callback.answer()
+        await safe_edit_text(
+            callback.message,
+            await rollypay_admin_card(),
+            reply_markup=rollypay_admin_keyboard(),
+        )
         return
     if action == "menu":
         await callback.answer()
@@ -3352,18 +3520,27 @@ async def main() -> None:
             db.known_submission_user_count(),
         )
         try:
+            startup_backup = db.backup(keep=DB_BACKUP_KEEP)
+            if startup_backup:
+                logger.info("Startup database backup created: %s", startup_backup)
+        except (OSError, sqlite3.DatabaseError) as exc:
+            logger.error("Startup database backup failed: %s", exc)
+        try:
             await safe_bot_send_message(bot, moderation_chat_id(), restart_notice())
         except TelegramAPIError as exc:
             logger.warning("Could not send restart notice to the moderation group: %s", exc)
         await cleanup_processed_inline_keyboards(bot)
         recovery_job = asyncio.create_task(recover(bot))
         removal_reconcile_job = asyncio.create_task(reconcile_removal_payments(bot))
+        database_backup_job = asyncio.create_task(database_backup_loop())
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
         if "recovery_job" in locals():
             recovery_job.cancel()
         if "removal_reconcile_job" in locals():
             removal_reconcile_job.cancel()
+        if "database_backup_job" in locals():
+            database_backup_job.cancel()
         for job in album_jobs.values():
             job.cancel()
         for job in reply_jobs.values():

@@ -1,12 +1,43 @@
 """Strict parsing of Telegram channel post URLs (no external URL fetching)."""
 from __future__ import annotations
 
+import hashlib
 import re
 from urllib.parse import urlsplit
 
 
 class InvalidPostLink(ValueError):
     pass
+
+
+_DISCLAIMER_MARKER = "This channel fully complies with all platform rules"
+_REMOVE_LINK_RE = re.compile(
+    r"(?:https://t\.me/PozorMgnBot\?start=remove_[A-Za-z0-9_-]+|Удалить пост|Предложить пост)",
+    re.IGNORECASE,
+)
+
+
+def normalize_publication_text(value: str) -> str:
+    """Normalize the user-authored part of a published post.
+
+    Telegram exports and forwarded messages may render the disclaimer and bot
+    links differently.  Removing those generated fragments gives old exports
+    and live forwards the same stable identity.
+    """
+    text = value or ""
+    if _DISCLAIMER_MARKER in text:
+        text = text.split(_DISCLAIMER_MARKER, 1)[0]
+    if "━━━━━━━━━━━━━━" in text:
+        text = text.split("━━━━━━━━━━━━━━", 1)[0]
+    text = _REMOVE_LINK_RE.sub(" ", text)
+    return " ".join(text.split()).strip().casefold()
+
+
+def publication_text_fingerprint(value: str) -> str:
+    normalized = normalize_publication_text(value)
+    if not normalized or normalized in {"[фото]", "фотография", "photo"}:
+        return ""
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def parse_post_link(raw: str) -> tuple[str, int]:
