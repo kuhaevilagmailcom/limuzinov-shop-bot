@@ -49,9 +49,9 @@ PAYMENT_LEDGER_SQL = """
         SELECT payment_id, 'post_action' AS payment_type, order_id,
                buyer_user_id AS buyer_id, amount_rub, status, created_at, paid_at,
                CASE action
-                   WHEN 'author_lookup' THEN 'Информация об авторе'
-                   ELSE 'Удаление публикации'
-               END AS description
+                   WHEN 'author_lookup' THEN 'Инфа'
+                   ELSE 'Удаление поста'
+               END || ' #' || submission_id AS description
         FROM removal_payments
         UNION ALL
         SELECT payment_id, 'invoice', order_id, buyer_user_id, amount_rub,
