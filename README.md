@@ -75,7 +75,9 @@ Telegram-бот на Python 3.11+ и aiogram 3. Пользователь отп�
 2. Останови основной бот или сделай копию SQLite штатным backup, чтобы импорт не конкурировал с записью.
 3. Сначала выполни проверочный проход:
 
-   `python channel_backfill.py --moderation-channel -5106639548 --publication-channel @ChannelName --db /app/data/suggestions.sqlite3 --dry-run`
+   `python channel_backfill.py --moderation-channel -5106639548 --publication-channel -1001234567890 --db /app/data/suggestions.sqlite3 --dry-run`
+
+   Если у канала есть публичный username, вместо числового ID можно указать `@ChannelName`. Для приватного канала без username обязательно используй полный ID формата `-100...`.
 
 4. Если статистика выглядит правильно, повтори команду без `--dry-run`. При первом запуске Telegram запросит номер телефона, код и пароль 2FA, если он включён. Локальный `*.session` уже исключён из git.
 

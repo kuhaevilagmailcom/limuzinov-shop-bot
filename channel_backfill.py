@@ -52,6 +52,12 @@ def message_text(message) -> str:
     return str(getattr(message, "raw_text", None) or getattr(message, "message", None) or "")
 
 
+def entity_ref(value: str) -> int | str:
+    """Telethon requires private channel IDs to be integers, not numeric strings."""
+    value = value.strip()
+    return int(value) if re.fullmatch(r"-?\d+", value) else value
+
+
 def normalized_content(text: str) -> str:
     """Build a stable key shared by moderation and publication copies."""
     text = text.split("━━━━━━━━━━━━━━", 1)[0]
@@ -169,8 +175,8 @@ async def run(args: argparse.Namespace) -> int:
     client = TelegramClient(args.session, api_id, api_hash)
     await client.start()
     try:
-        moderation = await client.get_entity(args.moderation_channel)
-        publication = await client.get_entity(args.publication_channel)
+        moderation = await client.get_entity(entity_ref(args.moderation_channel))
+        publication = await client.get_entity(entity_ref(args.publication_channel))
         authors_by_id, authors_by_text = await scan_authors(client, moderation)
         publications = await scan_publications(client, publication)
         publication_chat_id = int(getattr(publication, "id"))

@@ -1,10 +1,14 @@
 import unittest
 from types import SimpleNamespace
 
-from channel_backfill import normalized_content, parse_author, publication_link
+from channel_backfill import entity_ref, normalized_content, parse_author, publication_link
 
 
 class ChannelBackfillParsingTests(unittest.TestCase):
+    def test_private_channel_id_is_converted_to_integer(self):
+        self.assertEqual(entity_ref("-1001234567890"), -1001234567890)
+        self.assertEqual(entity_ref("@PublicChannel"), "@PublicChannel")
+
     def test_parses_sender_footer(self):
         parsed = parse_author(
             "Пост\n\n━━━━━━━━━━━━━━\n👤 Отправитель: @Poster_1 · ID 123456\n👤 Имя: Иван Иванов"
