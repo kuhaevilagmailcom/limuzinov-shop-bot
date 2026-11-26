@@ -245,18 +245,8 @@ async def moderation_group_membership(bot: Bot, user_id: int) -> bool | None:
 
 
 async def is_blocked_from_suggestions(bot: Bot, user_id: int) -> bool:
-    """Never keep a confirmed moderation-group member blocked from the suggestion inbox."""
-    if not db.is_blocked(user_id):
-        return False
-    membership = await moderation_group_membership(bot, user_id)
-    if membership is True:
-        db.unblock_user(user_id)
-        logger.warning(
-            "Automatically unblocked moderation-group member %s from the suggestion inbox",
-            user_id,
-        )
-        return False
-    return True
+    """A manual block always denies new suggestions until /unblock is used."""
+    return db.is_blocked(user_id)
 
 
 async def is_moderation_admin(bot: Bot, user_id: int) -> bool:
@@ -1908,6 +1898,7 @@ async def help_command(message: Message, bot: Bot) -> None:
         "/users — список пользователей с ником и ID\n"
         "/done ТЕКСТ — рассылка всем пользователям; также можно ответить командой /done на сообщение "
         "и разослать его (после подтверждения)\n"
+        "/ban USER_ID — запретить пользователю отправлять новые посты\n"
         "/unblock USER_ID — снять блокировку\n"
         "/setdeleteprice СУММА — изменить цену удаления поста в рублях\n"
         "/setinfoprice СУММА — изменить цену сведений об авторе в рублях\n"
@@ -2522,9 +2513,39 @@ async def set_info_price_command(message: Message, bot: Bot) -> None:
     await message.answer(f"{ce('check')} Цена сведений об авторе: <b>{amount} ₽</b>.")
 
 
-@router.message(Command("unblock"), F.chat.type.in_({"group", "supergroup"}))
-async def unblock_command(message: Message) -> None:
+@router.message(Command("ban"), F.chat.type.in_({"group", "supergroup"}))
+async def ban_command(message: Message, bot: Bot) -> None:
     if message.chat.id != moderation_chat_id():
+        return
+    if not message.from_user or not await is_moderation_admin(bot, message.from_user.id):
+        await message.answer("Команда доступна только администраторам группы модерации.")
+        return
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) != 2 or not parts[1].strip().isdigit():
+        await message.answer("Используй: <code>/ban USER_ID</code>")
+        return
+    target_user_id = int(parts[1].strip())
+    if target_user_id <= 0:
+        await message.answer("USER_ID должен быть положительным числом.")
+        return
+    db.block_user(target_user_id, message.from_user.id)
+    await safe_answer(
+        message,
+        f"{ce('ban')} Пользователь <code>{target_user_id}</code> заблокирован и больше не сможет отправлять посты.",
+    )
+    await safe_notify(
+        bot,
+        target_user_id,
+        f"{ce('ban')} Доступ к отправке предложений заблокирован.",
+    )
+
+
+@router.message(Command("unblock"), F.chat.type.in_({"group", "supergroup"}))
+async def unblock_command(message: Message, bot: Bot) -> None:
+    if message.chat.id != moderation_chat_id():
+        return
+    if not message.from_user or not await is_moderation_admin(bot, message.from_user.id):
+        await message.answer("Команда доступна только администраторам группы модерации.")
         return
     parts = (message.text or "").split(maxsplit=1)
     if len(parts) != 2 or not parts[1].strip().isdigit():

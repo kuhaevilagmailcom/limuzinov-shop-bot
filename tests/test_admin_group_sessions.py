@@ -40,6 +40,26 @@ class AdminGroupSessionTests(unittest.IsolatedAsyncioTestCase):
         set_active_price.assert_called_once_with(250)
         self.assertNotIn(111, app.admin_sessions)
 
+    async def test_ban_command_blocks_any_user_until_explicit_unblock(self):
+        message = group_message("/ban 987654")
+        bot = AsyncMock()
+        with patch.object(app, "moderation_chat_id", return_value=-10042), \
+             patch.object(app, "is_moderation_admin", new=AsyncMock(return_value=True)), \
+             patch.object(app.db, "block_user") as block_user, \
+             patch.object(app, "safe_answer", new=AsyncMock()) as reply, \
+             patch.object(app, "safe_notify", new=AsyncMock()):
+            await app.ban_command(message, bot)
+        block_user.assert_called_once_with(987654, 111)
+        self.assertIn("больше не сможет отправлять посты", reply.await_args.args[1])
+
+    async def test_block_is_not_removed_for_moderation_group_member(self):
+        with patch.object(app.db, "is_blocked", return_value=True), \
+             patch.object(app.db, "unblock_user") as unblock, \
+             patch.object(app, "moderation_group_membership", new=AsyncMock(return_value=True)) as membership:
+            self.assertTrue(await app.is_blocked_from_suggestions(AsyncMock(), 987654))
+        unblock.assert_not_called()
+        membership.assert_not_awaited()
+
     async def test_group_creation_collects_title_price_and_end_date(self):
         message = group_message("Telegram Premium")
         app.admin_sessions[111] = ("giveaway_title", -10042)
